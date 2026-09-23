@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# PyInstaller / Build outputs
+build/
+dist/
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Antigravity & AI metadata / plans
+.gemini/
+.specify/
+*.plan.md
+
+# Local database files & exported logs
+*.db
+*.log
+*.xlsx
