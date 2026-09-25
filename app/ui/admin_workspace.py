@@ -58,7 +58,10 @@ class AdminWorkspace(QMainWindow):
         # Tab 3: Task Management
         tabs.addTab(self.create_task_tab(), "Manage Tasks")
 
-        # Tab 4: Excel Export
+        # Tab 4: Revision & Performance Analysis
+        tabs.addTab(self.create_analysis_tab(), "Analysis & Revision Insights")
+
+        # Tab 5: Excel Export
         tabs.addTab(self.create_export_tab(), "Excel Reports")
 
         main_layout.addWidget(tabs)
@@ -374,7 +377,7 @@ class AdminWorkspace(QMainWindow):
                 self.tbl_employees.setItem(r_idx, 0, QTableWidgetItem(emp["user_id"]))
                 self.tbl_employees.setItem(r_idx, 1, QTableWidgetItem(emp["role"]))
 
-                btn_rst = QPushButton("🔄 Reset Pass")
+                btn_rst = QPushButton("Reset Pass")
                 btn_rst.clicked.connect(lambda _, eid=emp["user_id"]: self.on_reset_password(eid))
                 self.tbl_employees.setCellWidget(r_idx, 2, btn_rst)
 
@@ -423,8 +426,180 @@ class AdminWorkspace(QMainWindow):
                 btn_t_hide = QPushButton("Unhide" if t["is_hidden"] else "Hide / Delete")
                 if not t["is_hidden"]:
                     btn_t_hide.setObjectName("DangerButton")
-                btn_t_hide.clicked.connect(lambda _, tid=t["task_id"], h=t["is_hidden"]: self.on_toggle_hide_task(tid, h))
+                btn_t_hide.clicked.connect(lambda _, tid=t["task_id"], h=t["is_hidden"]: self.on_toggle_hide_project(tid, h) if False else self.on_toggle_hide_task(tid, h))
                 self.tbl_tasks.setCellWidget(r_idx, 4, btn_t_hide)
+
+        self.reload_analysis_data()
+
+    # ------------------- ANALYSIS TAB -------------------
+    def create_analysis_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Summary Metric Cards Row
+        metrics_row = QHBoxLayout()
+
+        card_logs = QFrame()
+        card_logs.setObjectName("CardFrame")
+        cl_layout = QVBoxLayout(card_logs)
+        cl_layout.addWidget(QLabel("Total Progress Logs", objectName="FieldLabel"))
+        self.lbl_metric_logs = QLabel("0", objectName="SubTitle")
+        self.lbl_metric_logs.setStyleSheet("font-size: 22px; font-weight: bold; color: #7C3AED;")
+        cl_layout.addWidget(self.lbl_metric_logs)
+
+        card_rev = QFrame()
+        card_rev.setObjectName("CardFrame")
+        cr_layout = QVBoxLayout(card_rev)
+        cr_layout.addWidget(QLabel("Total Revisions / Rework", objectName="FieldLabel"))
+        self.lbl_metric_revisions = QLabel("0", objectName="SubTitle")
+        self.lbl_metric_revisions.setStyleSheet("font-size: 22px; font-weight: bold; color: #F59E0B;")
+        cr_layout.addWidget(self.lbl_metric_revisions)
+
+        card_prj = QFrame()
+        card_prj.setObjectName("CardFrame")
+        cp_layout = QVBoxLayout(card_prj)
+        cp_layout.addWidget(QLabel("Active Projects", objectName="FieldLabel"))
+        self.lbl_metric_projects = QLabel("0", objectName="SubTitle")
+        self.lbl_metric_projects.setStyleSheet("font-size: 22px; font-weight: bold; color: #10B981;")
+        cp_layout.addWidget(self.lbl_metric_projects)
+
+        card_emp = QFrame()
+        card_emp.setObjectName("CardFrame")
+        ce_layout = QVBoxLayout(card_emp)
+        ce_layout.addWidget(QLabel("Head Employees", objectName="FieldLabel"))
+        self.lbl_metric_employees = QLabel("0", objectName="SubTitle")
+        self.lbl_metric_employees.setStyleSheet("font-size: 22px; font-weight: bold; color: #3B82F6;")
+        ce_layout.addWidget(self.lbl_metric_employees)
+
+        metrics_row.addWidget(card_logs)
+        metrics_row.addWidget(card_rev)
+        metrics_row.addWidget(card_prj)
+        metrics_row.addWidget(card_emp)
+
+        layout.addLayout(metrics_row)
+
+        # Tables Layout
+        tables_layout = QHBoxLayout()
+
+        # Employee Revision Breakdown Table
+        emp_card = QFrame()
+        emp_card.setObjectName("CardFrame")
+        emp_l = QVBoxLayout(emp_card)
+        emp_l.addWidget(QLabel("Employee Rework & Revision Analysis", objectName="SubTitle"))
+
+        self.tbl_emp_analysis = QTableWidget(0, 6)
+        self.tbl_emp_analysis.setHorizontalHeaderLabels([
+            "Employee ID", "Full Name", "Total Logs", "New Tasks", "Continuations", "Revisions (Rework)"
+        ])
+        self.tbl_emp_analysis.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        emp_l.addWidget(self.tbl_emp_analysis)
+        tables_layout.addWidget(emp_card, 1)
+
+        # Project Status & Revision Breakdown Table
+        prj_card = QFrame()
+        prj_card.setObjectName("CardFrame")
+        prj_l = QVBoxLayout(prj_card)
+        prj_l.addWidget(QLabel("Project Task Status & Revision Breakdown", objectName="SubTitle"))
+
+        self.tbl_prj_analysis = QTableWidget(0, 7)
+        self.tbl_prj_analysis.setHorizontalHeaderLabels([
+            "Project ID", "Project Name", "Total Tasks", "Done", "In Progress", "Hold", "Rework Entries"
+        ])
+        self.tbl_prj_analysis.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        prj_l.addWidget(self.tbl_prj_analysis)
+        tables_layout.addWidget(prj_card, 1)
+
+        layout.addLayout(tables_layout)
+
+        btn_refresh = QPushButton("Refresh Analysis Data")
+        btn_refresh.clicked.connect(self.reload_analysis_data)
+        layout.addWidget(btn_refresh)
+
+        return widget
+
+    def reload_analysis_data(self):
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Metric counts
+            cursor.execute("SELECT COUNT(*) AS count FROM progress_logs")
+            row_l = cursor.fetchone()
+            total_logs = row_l["count"] if row_l else 0
+
+            cursor.execute("SELECT COUNT(*) AS count FROM progress_logs WHERE entry_type = 'REVISION'")
+            row_r = cursor.fetchone()
+            total_revisions = row_r["count"] if row_r else 0
+
+            cursor.execute("SELECT COUNT(*) AS count FROM projects WHERE is_hidden = 0")
+            row_p = cursor.fetchone()
+            active_projects = row_p["count"] if row_p else 0
+
+            cursor.execute("SELECT COUNT(*) AS count FROM users WHERE role = 'HEAD'")
+            row_e = cursor.fetchone()
+            active_employees = row_e["count"] if row_e else 0
+
+            self.lbl_metric_logs.setText(str(total_logs))
+            self.lbl_metric_revisions.setText(str(total_revisions))
+            self.lbl_metric_projects.setText(str(active_projects))
+            self.lbl_metric_employees.setText(str(active_employees))
+
+            # Employee Analysis
+            cursor.execute("""
+            SELECT u.user_id, u.full_name,
+                   COUNT(l.log_id) AS total_logs,
+                   SUM(CASE WHEN l.entry_type = 'NEW' THEN 1 ELSE 0 END) AS new_logs,
+                   SUM(CASE WHEN l.entry_type = 'CONTINUATION' THEN 1 ELSE 0 END) AS cont_logs,
+                   SUM(CASE WHEN l.entry_type = 'REVISION' THEN 1 ELSE 0 END) AS rev_logs
+            FROM users u
+            LEFT JOIN progress_logs l ON u.user_id = l.employee_id
+            WHERE u.role = 'HEAD'
+            GROUP BY u.user_id, u.full_name
+            ORDER BY rev_logs DESC, total_logs DESC
+            """)
+            emp_stats = cursor.fetchall()
+            self.tbl_emp_analysis.setRowCount(0)
+            for r_idx, s in enumerate(emp_stats):
+                self.tbl_emp_analysis.insertRow(r_idx)
+                self.tbl_emp_analysis.setItem(r_idx, 0, QTableWidgetItem(s["user_id"]))
+                self.tbl_emp_analysis.setItem(r_idx, 1, QTableWidgetItem(s["full_name"] or s["user_id"]))
+                self.tbl_emp_analysis.setItem(r_idx, 2, QTableWidgetItem(str(s["total_logs"])))
+                self.tbl_emp_analysis.setItem(r_idx, 3, QTableWidgetItem(str(s["new_logs"])))
+                self.tbl_emp_analysis.setItem(r_idx, 4, QTableWidgetItem(str(s["cont_logs"])))
+                
+                rev_item = QTableWidgetItem(str(s["rev_logs"]))
+                if s["rev_logs"] > 0:
+                    rev_item.setForeground(Qt.yellow)
+                self.tbl_emp_analysis.setItem(r_idx, 5, rev_item)
+
+            # Project Analysis
+            cursor.execute("""
+            SELECT p.project_id, p.name AS project_name,
+                   COUNT(DISTINCT t.task_id) AS total_tasks,
+                   SUM(CASE WHEN l.entry_type = 'REVISION' THEN 1 ELSE 0 END) AS total_revisions,
+                   SUM(CASE WHEN l.progress_stage = 'Done' THEN 1 ELSE 0 END) AS done_count,
+                   SUM(CASE WHEN l.progress_stage = 'In Progress' THEN 1 ELSE 0 END) AS in_prog_count,
+                   SUM(CASE WHEN l.progress_stage = 'Hold' THEN 1 ELSE 0 END) AS hold_count
+            FROM projects p
+            LEFT JOIN tasks t ON p.project_id = t.project_id
+            LEFT JOIN progress_logs l ON p.project_id = l.project_id
+            WHERE p.is_hidden = 0
+            GROUP BY p.project_id, p.name
+            """)
+            prj_stats = cursor.fetchall()
+            self.tbl_prj_analysis.setRowCount(0)
+            for r_idx, ps in enumerate(prj_stats):
+                self.tbl_prj_analysis.insertRow(r_idx)
+                self.tbl_prj_analysis.setItem(r_idx, 0, QTableWidgetItem(ps["project_id"]))
+                self.tbl_prj_analysis.setItem(r_idx, 1, QTableWidgetItem(ps["project_name"]))
+                self.tbl_prj_analysis.setItem(r_idx, 2, QTableWidgetItem(str(ps["total_tasks"])))
+                self.tbl_prj_analysis.setItem(r_idx, 3, QTableWidgetItem(str(ps["done_count"])))
+                self.tbl_prj_analysis.setItem(r_idx, 4, QTableWidgetItem(str(ps["in_prog_count"])))
+                self.tbl_prj_analysis.setItem(r_idx, 5, QTableWidgetItem(str(ps["hold_count"])))
+                
+                rev_p_item = QTableWidgetItem(str(ps["total_revisions"]))
+                if ps["total_revisions"] > 0:
+                    rev_p_item.setForeground(Qt.yellow)
+                self.tbl_prj_analysis.setItem(r_idx, 6, rev_p_item)
 
     def on_logout(self):
         confirm = QMessageBox.question(
@@ -434,3 +609,4 @@ class AdminWorkspace(QMainWindow):
         if confirm == QMessageBox.Yes:
             self.logout_requested = True
             self.close()
+
