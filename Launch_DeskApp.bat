@@ -1,2 +1,6 @@
 @echo off
-start "" pythonw.exe main.py
+if exist "dist\DeskApp\DeskApp.exe" (
+    start "" "dist\DeskApp\DeskApp.exe"
+) else (
+    start "" pythonw.exe main.py
+)

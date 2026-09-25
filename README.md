@@ -20,6 +20,11 @@
   - **Employee Workstation**: Daily Progress Logging Form with Project & Task selection, start/end dates, task logging context, status selection, and detailed work notes.
   - **Admin / COO / SuperAdmin Workstations**: Executive dashboards, project monitoring, task assignment, and analytics.
 
+- **Analysis & Revision Insights Panel**:
+  - Real-time metrics overview: Total Progress Logs, Total Revisions/Rework, Active Projects, Active Head Employees.
+  - Per-Employee Rework Breakdown: Tracks New Tasks, Continuations, and Revisions (Rework) per employee.
+  - Per-Project Status Breakdown: Monitors task progress stages (Done, In Progress, Hold) and total Rework Cycles per project.
+
 - **Advanced Revision & Rework Tracking**:
   - Tracks task context: `New Task`, `Continuation`, and `Revision / Rework`.
   - Automatic incremental tracking for rework iterations (**R1, R2, R3...**) per employee and per project to provide insights into rework frequency and code/design quality.
@@ -32,6 +37,42 @@
 - **User Session & Header Management**:
   - Top navigation bar dynamically displays current employee name and user ID (e.g., `Employee: Eng. Abdelrahman (1001)`).
   - Built-in **Logout** dialog allowing clean session termination and instant return to the Login screen.
+
+---
+
+## Deployment & Setup Guide (LAN Network Deployment)
+
+### 🖥️ 1. Central Server Setup (إعداد جهاز السيرفر الرئيسي)
+
+The Central Server runs in **Headless Daemon Mode** (`--server-only`) to manage real-time WebSocket messaging and central database synchronization.
+
+#### Method A: Using Standalone Executable (Recommended for Non-Developers)
+1. Copy the compiled `dist/DeskApp/` directory to the Central Server PC.
+2. Double-click **`Launch_Server_Daemon.bat`** (or run `DeskApp.exe --server-only` in CMD).
+3. **Firewall Note**: Ensure port **`8765`** is allowed through Windows Firewall for Inbound TCP connections on the Local Network (LAN).
+4. Note down the Central Server's IPv4 address:
+   - Open Command Prompt (`cmd`) on the Server PC.
+   - Run `ipconfig` and copy the **IPv4 Address** (e.g., `192.168.1.50`).
+
+#### Method B: Running from Source
+```bash
+python main.py --server-only --port 8765
+```
+
+---
+
+### 💻 2. Client Workstation Setup (إعداد أجهزة الموظفين والإدارة)
+
+Each employee, admin, COO, or superadmin PC runs the `DeskApp` GUI client connected to the Central Server IP.
+
+1. Copy the `dist/DeskApp/` directory to the Client PC.
+2. Double-click **`DeskApp.exe`** (or `Launch_DeskApp.bat`).
+3. On the **Login Screen**:
+   - Enter your **Username / User ID** and **Password**.
+   - Enter the **Central Server LAN IP** (e.g., `192.168.1.50`).
+4. Click **Login**.
+
+> **Note (Offline Mode)**: If the Central Server PC is temporarily offline or unreachable, DeskApp will automatically save all submitted progress logs into the local queue (`client_queue.db`) and display `Disconnected / Offline`. Once the Server comes back online, DeskApp automatically syncs all queued logs without data loss!
 
 ---
 
@@ -48,67 +89,6 @@
 
 ---
 
-## Project Directory Structure
-
-```
-DeskApp/
-├── app/
-│   ├── core/           # Configuration parameters and application constants
-│   ├── database/       # Database Manager, migrations, and schema models
-│   ├── network/        # Async WebSocket Server & Client sync daemons
-│   └── ui/             # PySide6 Windows, Dialogs, Styles (QSS), and UI components
-├── data/               # Local SQLite database storage
-├── tests/              # PyTest test suite for core logic and network sync
-├── DeskApp.spec        # PyInstaller build specification
-├── Launch_DeskApp.bat  # Quick launch script for DeskApp GUI
-├── main.py             # Main application entry point
-├── README.md           # Documentation
-└── .gitignore          # Git exclusion rules
-```
-
----
-
-## Installation & Setup
-
-### Prerequisites
-- Python 3.10 or higher installed on your system.
-
-### 1. Clone the Repository
-```bash
-git clone https://github.com/AbdelrahmanGamal236/Sprints_DeskApp.git
-cd Sprints_DeskApp
-```
-
-### 2. Set Up Virtual Environment (Recommended)
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-```
-
-### 3. Install Dependencies
-```bash
-pip install PySide6 qasync websockets openpyxl pytest
-```
-
----
-
-## Running the Application
-
-### Option A: Run via Python
-To start the application directly from source:
-```bash
-python main.py
-```
-
-### Option B: Run via Batch Launcher
-Double-click `Launch_DeskApp.bat` or run in terminal:
-```bash
-Launch_DeskApp.bat
-```
-
----
-
 ## Credentials for Testing
 
 You can use the following default demo credentials on the Login screen:
@@ -120,27 +100,36 @@ You can use the following default demo credentials on the Login screen:
 | **`coo`** | `coo` | COO |
 | **`superadmin`** | `superadmin` | Super Admin |
 
-*Default Central Server LAN IP:* `127.0.0.1`
-
 ---
 
-## Building Standalone Executable (.exe)
+## Development Setup (Running from Source)
 
-To generate a single-folder standalone Windows executable:
+### Prerequisites
+- Python 3.10 or higher.
 
+### 1. Clone & Set Up
+```bash
+git clone https://github.com/AbdelrahmanGamal236/Sprints_DeskApp.git
+cd Sprints_DeskApp
+
+python -m venv venv
+venv\Scripts\activate
+pip install PySide6 qasync websockets openpyxl pytest
+```
+
+### 2. Run GUI Client
+```bash
+python main.py
+```
+
+### 3. Build Executable
 ```bash
 pyinstaller DeskApp.spec --noconfirm
 ```
-The compiled output will be generated inside the `dist/DeskApp/` directory.
 
----
-
-## Running Unit Tests
-
-Run the automated test suite with `pytest`:
-
+### 4. Run Automated Test Suite
 ```bash
-pytest tests/
+python -m pytest
 ```
 
 ---
