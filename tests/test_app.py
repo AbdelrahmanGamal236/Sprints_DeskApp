@@ -108,6 +108,55 @@ class TestOfflineApp(unittest.TestCase):
             self.assertEqual(emp_stat["total_logs"], 2)
             self.assertEqual(emp_stat["rev_logs"], 1)
 
+    def test_task_id_generation(self):
+        next_id = self.db.generate_next_task_id("PRJ-01")
+        self.assertEqual(next_id, "TSK-04")
+
+    def test_task_proposal_approval_flow(self):
+        # 1. Propose task
+        prop = self.db.create_task_proposal("PRJ-01", "Core Router Setup", "1001")
+        self.assertEqual(prop["status"], "PENDING")
+        self.assertEqual(prop["task_id"], "TSK-04")
+        self.assertEqual(prop["proposed_by_id"], "1001")
+
+        # 2. Query pending proposals
+        pending = self.db.get_task_proposals(status="PENDING")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["task_name"], "Core Router Setup")
+
+        # 3. Approve proposal
+        approved = self.db.approve_task_proposal(prop["proposal_id"], "admin")
+        self.assertEqual(approved["status"], "APPROVED")
+        self.assertEqual(approved["admin_id"], "admin")
+
+        # 4. Verify task exists in tasks table
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tasks WHERE task_id = 'TSK-04'")
+            task_row = cursor.fetchone()
+            self.assertIsNotNone(task_row)
+            self.assertEqual(task_row["name"], "Core Router Setup")
+            self.assertEqual(task_row["proposed_by_id"], "1001")
+
+        # 5. Verify pending list is now empty and next auto-id is TSK-05
+        self.assertEqual(len(self.db.get_task_proposals(status="PENDING")), 0)
+        self.assertEqual(self.db.generate_next_task_id("PRJ-01"), "TSK-05")
+
+    def test_task_proposal_rejection_flow(self):
+        # 1. Propose task
+        prop = self.db.create_task_proposal("PRJ-01", "Duplicate Task", "1001")
+        
+        # 2. Reject proposal with reason
+        rejected = self.db.reject_task_proposal(prop["proposal_id"], "admin", "Out of current project scope")
+        self.assertEqual(rejected["status"], "REJECTED")
+        self.assertEqual(rejected["rejection_reason"], "Out of current project scope")
+
+        # 3. Verify task was NOT inserted into active tasks table
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tasks WHERE name = 'Duplicate Task'")
+            self.assertIsNone(cursor.fetchone())
+
 if __name__ == "__main__":
     unittest.main()
 

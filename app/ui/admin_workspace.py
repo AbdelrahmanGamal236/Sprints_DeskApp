@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QFrame, QListWidget, QListWidgetItem, 
     QComboBox, QTabWidget, QMessageBox, QFileDialog, QTableWidget, 
-    QTableWidgetItem, QHeaderView
+    QTableWidgetItem, QHeaderView, QInputDialog
 )
 from app.core.config import ROLE_HEAD
 from app.core.auth import hash_password
@@ -66,6 +66,11 @@ class AdminWorkspace(QMainWindow):
 
         main_layout.addWidget(tabs)
         main_layout.addWidget(CopyrightFooter(self))
+
+        # Network signal bindings
+        self.net_client.task_proposal_event.connect(self.on_task_proposal_event)
+        self.net_client.global_refresh_received.connect(self.reload_all_data)
+
         self.reload_all_data()
 
     # ------------------- EMPLOYEE TAB -------------------
@@ -241,28 +246,48 @@ class AdminWorkspace(QMainWindow):
     # ------------------- TASK TAB -------------------
     def create_task_tab(self) -> QWidget:
         widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        self.task_subtabs = QTabWidget(widget)
+
+        # Sub-tab 1: Active Tasks & Direct Add
+        self.task_subtabs.addTab(self.create_active_tasks_subtab(), "Active Tasks & Direct Add")
+
+        # Sub-tab 2: Pending Approvals
+        self.task_subtabs.addTab(self.create_pending_proposals_subtab(), "Pending Approvals")
+
+        # Sub-tab 3: Audit Sequence Timeline
+        self.task_subtabs.addTab(self.create_proposals_timeline_subtab(), "Audit Sequence Timeline")
+
+        layout.addWidget(self.task_subtabs)
+        return widget
+
+    def create_active_tasks_subtab(self) -> QWidget:
+        widget = QWidget()
         layout = QHBoxLayout(widget)
 
         form_card = QFrame()
         form_card.setObjectName("CardFrame")
         f_layout = QVBoxLayout(form_card)
 
-        f_layout.addWidget(QLabel("Add New Task", objectName="SubTitle"))
+        f_layout.addWidget(QLabel("Add New Task (Direct)", objectName="SubTitle"))
 
         f_layout.addWidget(QLabel("Select Project:", objectName="FieldLabel"))
         self.cmb_task_prj = QComboBox()
+        self.cmb_task_prj.currentIndexChanged.connect(self.update_task_id_preview)
         f_layout.addWidget(self.cmb_task_prj)
 
-        f_layout.addWidget(QLabel("Task ID:", objectName="FieldLabel"))
+        f_layout.addWidget(QLabel("Task ID (Auto-Generated):", objectName="FieldLabel"))
         self.txt_task_id = QLineEdit()
-        self.txt_task_id.setPlaceholderText("e.g. TSK-04")
+        self.txt_task_id.setPlaceholderText("Auto-generated ID (e.g. TSK-04)")
         f_layout.addWidget(self.txt_task_id)
 
         f_layout.addWidget(QLabel("Task Name:", objectName="FieldLabel"))
         self.txt_task_name = QLineEdit()
+        self.txt_task_name.setPlaceholderText("e.g. Server Core Upgrade")
         f_layout.addWidget(self.txt_task_name)
 
-        btn_add_task = QPushButton("Add Task")
+        btn_add_task = QPushButton("Add Task Directly")
         btn_add_task.clicked.connect(self.on_add_task)
         f_layout.addWidget(btn_add_task)
         f_layout.addStretch()
@@ -270,16 +295,64 @@ class AdminWorkspace(QMainWindow):
         list_card = QFrame()
         list_card.setObjectName("CardFrame")
         l_layout = QVBoxLayout(list_card)
-        l_layout.addWidget(QLabel("Tasks List", objectName="SubTitle"))
+        l_layout.addWidget(QLabel("Active Project Tasks", objectName="SubTitle"))
 
-        self.tbl_tasks = QTableWidget(0, 5)
-        self.tbl_tasks.setHorizontalHeaderLabels(["ID", "Project", "Name", "Status", "Actions"])
+        self.tbl_tasks = QTableWidget(0, 6)
+        self.tbl_tasks.setHorizontalHeaderLabels(["ID", "Project", "Name", "Origin / Proposed By", "Status", "Actions"])
         self.tbl_tasks.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         l_layout.addWidget(self.tbl_tasks)
 
         layout.addWidget(form_card, 1)
         layout.addWidget(list_card, 2)
         return widget
+
+    def create_pending_proposals_subtab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("Pending Task Approvals (Head Requests)", objectName="SubTitle"))
+        header_row.addStretch()
+
+        btn_refresh = QPushButton("Refresh Requests")
+        btn_refresh.clicked.connect(self.reload_all_data)
+        header_row.addWidget(btn_refresh)
+        layout.addLayout(header_row)
+
+        self.tbl_pending_proposals = QTableWidget(0, 7)
+        self.tbl_pending_proposals.setHorizontalHeaderLabels([
+            "Request ID", "Task ID", "Project", "Proposed Task Name", "Proposed By", "Submitted At", "Actions"
+        ])
+        self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.tbl_pending_proposals)
+        return widget
+
+    def create_proposals_timeline_subtab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("Audit Sequence Timeline - Task Requests & Decisions", objectName="SubTitle"))
+        header_row.addStretch()
+
+        btn_refresh = QPushButton("Refresh Timeline")
+        btn_refresh.clicked.connect(self.reload_all_data)
+        header_row.addWidget(btn_refresh)
+        layout.addLayout(header_row)
+
+        self.tbl_proposals_timeline = QTableWidget(0, 8)
+        self.tbl_proposals_timeline.setHorizontalHeaderLabels([
+            "Request ID", "Task ID", "Project", "Task Name", "Proposed By", "Submitted At", "Status", "Decision & Feedback"
+        ])
+        self.tbl_proposals_timeline.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.tbl_proposals_timeline)
+        return widget
+
+    def update_task_id_preview(self):
+        p_id = self.cmb_task_prj.currentData()
+        if p_id:
+            next_id = self.db.generate_next_task_id(p_id)
+            self.txt_task_id.setText(next_id)
 
     def on_add_task(self):
         p_id = self.cmb_task_prj.currentData()
@@ -301,8 +374,8 @@ class AdminWorkspace(QMainWindow):
                            (t_id, p_id, t_name))
             conn.commit()
 
-        self.txt_task_id.clear()
         self.txt_task_name.clear()
+        self.update_task_id_preview()
         self.toast.show_message(f"Task '{t_name}' added successfully!")
         self.reload_all_data()
         self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "TASK_ADDED"})
@@ -317,6 +390,59 @@ class AdminWorkspace(QMainWindow):
         self.toast.show_message(f"Task '{task_id}' visibility toggled.")
         self.reload_all_data()
         self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "TASK_VISIBILITY_CHANGED"})
+
+    def on_approve_proposal(self, proposal_id: str):
+        confirm = QMessageBox.question(
+            self, "Confirm Approval", 
+            f"Approve task proposal '{proposal_id}' and add task to project?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm == QMessageBox.Yes:
+            try:
+                self.net_client.send_action("APPROVE_TASK_PROPOSAL", {
+                    "proposal_id": proposal_id,
+                    "admin_id": self.user["user_id"]
+                })
+                self.toast.show_message(f"Task proposal '{proposal_id}' approved successfully!")
+                self.reload_all_data()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to approve proposal: {e}")
+
+    def on_reject_proposal(self, proposal_id: str):
+        reason, ok = QInputDialog.getText(
+            self, "Reject Task Proposal", 
+            "Please enter the reason for rejection (mandatory):"
+        )
+        if not ok:
+            return
+        reason = reason.strip()
+        if not reason:
+            QMessageBox.warning(self, "Validation Error", "Rejection reason cannot be empty.")
+            return
+
+        try:
+            self.net_client.send_action("REJECT_TASK_PROPOSAL", {
+                "proposal_id": proposal_id,
+                "admin_id": self.user["user_id"],
+                "reason": reason
+            })
+            self.toast.show_message(f"Task proposal '{proposal_id}' rejected.")
+            self.reload_all_data()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to reject proposal: {e}")
+
+    def on_task_proposal_event(self, data: dict):
+        prop = data.get("proposal", {})
+        msg_type = data.get("type")
+        if msg_type == "NEW_TASK_PROPOSAL_EVENT":
+            p_by = prop.get("proposed_by_id", "A Head employee")
+            t_name = prop.get("task_name", "")
+            self.toast.show_message(f"New task proposal from {p_by}: '{t_name}'")
+        elif msg_type == "TASK_PROPOSAL_DECIDED_EVENT":
+            status = prop.get("status")
+            t_name = prop.get("task_name")
+            self.toast.show_message(f"Task proposal '{t_name}' was {status.lower()}.")
+        self.reload_all_data()
 
     # ------------------- EXPORT TAB -------------------
     def create_export_tab(self) -> QWidget:
@@ -409,8 +535,10 @@ class AdminWorkspace(QMainWindow):
 
             # Tasks
             cursor.execute("""
-            SELECT t.*, p.name AS project_name FROM tasks t
+            SELECT t.*, p.name AS project_name, u.full_name AS proposer_name 
+            FROM tasks t
             LEFT JOIN projects p ON t.project_id = p.project_id
+            LEFT JOIN users u ON t.proposed_by_id = u.user_id
             """)
             tasks = cursor.fetchall()
             self.tbl_tasks.setRowCount(0)
@@ -419,15 +547,79 @@ class AdminWorkspace(QMainWindow):
                 self.tbl_tasks.setItem(r_idx, 0, QTableWidgetItem(t["task_id"]))
                 self.tbl_tasks.setItem(r_idx, 1, QTableWidgetItem(t["project_name"] or t["project_id"]))
                 self.tbl_tasks.setItem(r_idx, 2, QTableWidgetItem(t["name"]))
+
+                prop_by = t["proposer_name"] or t["proposed_by_id"] or "Admin (Direct)"
+                self.tbl_tasks.setItem(r_idx, 3, QTableWidgetItem(prop_by))
                 
                 t_status = "Hidden" if t["is_hidden"] else "Active"
-                self.tbl_tasks.setItem(r_idx, 3, QTableWidgetItem(t_status))
+                self.tbl_tasks.setItem(r_idx, 4, QTableWidgetItem(t_status))
 
                 btn_t_hide = QPushButton("Unhide" if t["is_hidden"] else "Hide / Delete")
                 if not t["is_hidden"]:
                     btn_t_hide.setObjectName("DangerButton")
-                btn_t_hide.clicked.connect(lambda _, tid=t["task_id"], h=t["is_hidden"]: self.on_toggle_hide_project(tid, h) if False else self.on_toggle_hide_task(tid, h))
-                self.tbl_tasks.setCellWidget(r_idx, 4, btn_t_hide)
+                btn_t_hide.clicked.connect(lambda _, tid=t["task_id"], h=t["is_hidden"]: self.on_toggle_hide_task(tid, h))
+                self.tbl_tasks.setCellWidget(r_idx, 5, btn_t_hide)
+
+        self.update_task_id_preview()
+
+        # Load Pending Task Proposals
+        pending_proposals = self.db.get_task_proposals(status="PENDING")
+        self.tbl_pending_proposals.setRowCount(0)
+        for r_idx, p in enumerate(pending_proposals):
+            self.tbl_pending_proposals.insertRow(r_idx)
+            self.tbl_pending_proposals.setItem(r_idx, 0, QTableWidgetItem(p["proposal_id"]))
+            self.tbl_pending_proposals.setItem(r_idx, 1, QTableWidgetItem(p["task_id"] or "Pending..."))
+            self.tbl_pending_proposals.setItem(r_idx, 2, QTableWidgetItem(p["project_name"] or p["project_id"]))
+            self.tbl_pending_proposals.setItem(r_idx, 3, QTableWidgetItem(p["task_name"]))
+            self.tbl_pending_proposals.setItem(r_idx, 4, QTableWidgetItem(f"{p['proposer_name'] or p['proposed_by_id']} ({p['proposed_by_id']})"))
+            self.tbl_pending_proposals.setItem(r_idx, 5, QTableWidgetItem(p["created_at"]))
+
+            act_widget = QWidget()
+            act_layout = QHBoxLayout(act_widget)
+            act_layout.setContentsMargins(4, 2, 4, 2)
+            act_layout.setSpacing(6)
+
+            btn_app = QPushButton("Approve")
+            btn_app.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_approve_proposal(pid))
+            act_layout.addWidget(btn_app)
+
+            btn_rej = QPushButton("Reject")
+            btn_rej.setObjectName("DangerButton")
+            btn_rej.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_reject_proposal(pid))
+            act_layout.addWidget(btn_rej)
+
+            self.tbl_pending_proposals.setCellWidget(r_idx, 6, act_widget)
+
+        if len(pending_proposals) > 0:
+            self.task_subtabs.setTabText(1, f"Pending Approvals ({len(pending_proposals)})")
+        else:
+            self.task_subtabs.setTabText(1, "Pending Approvals")
+
+        # Load Audit Sequence Timeline
+        all_proposals = self.db.get_task_proposals()
+        self.tbl_proposals_timeline.setRowCount(0)
+        for r_idx, p in enumerate(all_proposals):
+            self.tbl_proposals_timeline.insertRow(r_idx)
+            self.tbl_proposals_timeline.setItem(r_idx, 0, QTableWidgetItem(p["proposal_id"]))
+            self.tbl_proposals_timeline.setItem(r_idx, 1, QTableWidgetItem(p["task_id"] or "Pending..."))
+            self.tbl_proposals_timeline.setItem(r_idx, 2, QTableWidgetItem(p["project_name"] or p["project_id"]))
+            self.tbl_proposals_timeline.setItem(r_idx, 3, QTableWidgetItem(p["task_name"]))
+            self.tbl_proposals_timeline.setItem(r_idx, 4, QTableWidgetItem(f"{p['proposer_name'] or p['proposed_by_id']} ({p['proposed_by_id']})"))
+            self.tbl_proposals_timeline.setItem(r_idx, 5, QTableWidgetItem(p["created_at"]))
+
+            st_item = QTableWidgetItem(p["status"])
+            if p["status"] == "APPROVED":
+                st_item.setForeground(Qt.green)
+                dec_info = f"Approved by {p['admin_name'] or p['admin_id'] or 'Admin'} on {p['decided_at'] or ''}"
+            elif p["status"] == "REJECTED":
+                st_item.setForeground(Qt.red)
+                dec_info = f"Rejected on {p['decided_at'] or ''}: {p['rejection_reason'] or 'No reason provided'}"
+            else:
+                st_item.setForeground(Qt.yellow)
+                dec_info = "Pending Admin review..."
+
+            self.tbl_proposals_timeline.setItem(r_idx, 6, st_item)
+            self.tbl_proposals_timeline.setItem(r_idx, 7, QTableWidgetItem(dec_info))
 
         self.reload_analysis_data()
 

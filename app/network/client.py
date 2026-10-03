@@ -12,6 +12,7 @@ class NetworkClient(QObject):
     priority_alert_received = Signal(dict)
     log_event_received = Signal(dict)
     notification_response_received = Signal(dict)
+    task_proposal_event = Signal(dict)
     global_refresh_received = Signal()
 
     def __init__(self, user_id: str, role: str, server_ip: str = "127.0.0.1", port: int = DEFAULT_WS_PORT):
@@ -74,6 +75,8 @@ class NetworkClient(QObject):
                     self.log_event_received.emit(data)
                 elif msg_type == "NOTIFICATION_RESPONSE_EVENT":
                     self.notification_response_received.emit(data)
+                elif msg_type in ("NEW_TASK_PROPOSAL_EVENT", "TASK_PROPOSAL_DECIDED_EVENT"):
+                    self.task_proposal_event.emit(data)
                 elif msg_type == "GLOBAL_DATA_REFRESH":
                     self.global_refresh_received.emit()
 

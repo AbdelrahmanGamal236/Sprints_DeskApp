@@ -176,6 +176,43 @@ class CentralWebSocketServer:
                 "responded_at": responded_at
             }, target_roles=["COO", "SUPER_ADMIN"])
 
+        elif action == "PROPOSE_TASK":
+            project_id = payload.get("project_id")
+            task_name = payload.get("task_name")
+            proposed_by_id = payload.get("proposed_by_id")
+            prop = self.db.create_task_proposal(project_id, task_name, proposed_by_id)
+            await self.broadcast({
+                "type": "NEW_TASK_PROPOSAL_EVENT",
+                "proposal": prop
+            })
+
+        elif action == "APPROVE_TASK_PROPOSAL":
+            proposal_id = payload.get("proposal_id")
+            admin_id = payload.get("admin_id")
+            prop = self.db.approve_task_proposal(proposal_id, admin_id)
+            await self.broadcast({
+                "type": "TASK_PROPOSAL_DECIDED_EVENT",
+                "proposal": prop
+            })
+            await self.broadcast({
+                "type": "GLOBAL_DATA_REFRESH",
+                "reason": "TASK_PROPOSAL_APPROVED"
+            })
+
+        elif action == "REJECT_TASK_PROPOSAL":
+            proposal_id = payload.get("proposal_id")
+            admin_id = payload.get("admin_id")
+            reason = payload.get("reason", "No reason provided")
+            prop = self.db.reject_task_proposal(proposal_id, admin_id, reason)
+            await self.broadcast({
+                "type": "TASK_PROPOSAL_DECIDED_EVENT",
+                "proposal": prop
+            })
+            await self.broadcast({
+                "type": "GLOBAL_DATA_REFRESH",
+                "reason": "TASK_PROPOSAL_REJECTED"
+            })
+
         elif action == "DATA_UPDATE_EVENT":
             # Broadcast state changes (new project, hidden project, password reset, etc.)
             await self.broadcast({

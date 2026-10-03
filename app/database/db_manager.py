@@ -119,6 +119,30 @@ class DBManager:
             );
             """)
 
+            # Task Proposals (Head requests -> Admin approves/rejects)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS task_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                task_id TEXT,
+                project_id TEXT NOT NULL,
+                task_name TEXT NOT NULL,
+                proposed_by_id TEXT NOT NULL,
+                status TEXT DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'APPROVED', 'REJECTED')),
+                admin_id TEXT,
+                rejection_reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                decided_at TIMESTAMP,
+                FOREIGN KEY(project_id) REFERENCES projects(project_id),
+                FOREIGN KEY(proposed_by_id) REFERENCES users(user_id)
+            );
+            """)
+
+            # Auto-Migration for tasks (add proposed_by_id)
+            cursor.execute("PRAGMA table_info(tasks)")
+            task_cols = [col["name"] for col in cursor.fetchall()]
+            if "proposed_by_id" not in task_cols:
+                cursor.execute("ALTER TABLE tasks ADD COLUMN proposed_by_id TEXT")
+
             conn.commit()
         
         self.seed_defaults()
@@ -198,6 +222,127 @@ class DBManager:
             """, (employee_id, project_id, task_id))
             row = cursor.fetchone()
             return row["next_rev"] if row else 1
+
+    def generate_next_task_id(self, project_id: str = None) -> str:
+        """Auto-generates sequential task ID (e.g. TSK-04) without collisions."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT task_id FROM tasks WHERE task_id LIKE 'TSK-%'")
+            t_ids = [row["task_id"] for row in cursor.fetchall() if row["task_id"]]
+            cursor.execute("SELECT task_id FROM task_proposals WHERE task_id LIKE 'TSK-%'")
+            p_ids = [row["task_id"] for row in cursor.fetchall() if row["task_id"]]
+
+            max_num = 0
+            for tid in t_ids + p_ids:
+                try:
+                    num_part = int(tid.split("-")[1])
+                    if num_part > max_num:
+                        max_num = num_part
+                except (IndexError, ValueError):
+                    continue
+            return f"TSK-{max_num + 1:02d}"
+
+    def create_task_proposal(self, project_id: str, task_name: str, proposed_by_id: str) -> dict:
+        proposal_id = f"PROP-{uuid.uuid4().hex[:8].upper()}"
+        task_id = self.generate_next_task_id(project_id)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+            INSERT INTO task_proposals (proposal_id, task_id, project_id, task_name, proposed_by_id, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
+            """, (proposal_id, task_id, project_id, task_name, proposed_by_id, now_str))
+            conn.commit()
+        return {
+            "proposal_id": proposal_id,
+            "task_id": task_id,
+            "project_id": project_id,
+            "task_name": task_name,
+            "proposed_by_id": proposed_by_id,
+            "status": "PENDING",
+            "created_at": now_str
+        }
+
+    def approve_task_proposal(self, proposal_id: str, admin_id: str) -> dict:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM task_proposals WHERE proposal_id = ?", (proposal_id,))
+            prop = cursor.fetchone()
+            if not prop:
+                raise ValueError(f"Proposal '{proposal_id}' not found.")
+
+            task_id = prop["task_id"]
+            cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+            if cursor.fetchone():
+                task_id = self.generate_next_task_id(prop["project_id"])
+
+            cursor.execute("""
+            INSERT OR IGNORE INTO tasks (task_id, project_id, name, is_hidden, proposed_by_id)
+            VALUES (?, ?, ?, 0, ?)
+            """, (task_id, prop["project_id"], prop["task_name"], prop["proposed_by_id"]))
+
+            cursor.execute("""
+            UPDATE task_proposals 
+            SET status = 'APPROVED', admin_id = ?, decided_at = ?, task_id = ?
+            WHERE proposal_id = ?
+            """, (admin_id, now_str, task_id, proposal_id))
+            conn.commit()
+        return {
+            "proposal_id": proposal_id,
+            "task_id": task_id,
+            "project_id": prop["project_id"],
+            "task_name": prop["task_name"],
+            "proposed_by_id": prop["proposed_by_id"],
+            "status": "APPROVED",
+            "admin_id": admin_id,
+            "decided_at": now_str
+        }
+
+    def reject_task_proposal(self, proposal_id: str, admin_id: str, reason: str) -> dict:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+            UPDATE task_proposals 
+            SET status = 'REJECTED', admin_id = ?, rejection_reason = ?, decided_at = ?
+            WHERE proposal_id = ?
+            """, (admin_id, reason, now_str, proposal_id))
+            conn.commit()
+        return {
+            "proposal_id": proposal_id,
+            "status": "REJECTED",
+            "admin_id": admin_id,
+            "rejection_reason": reason,
+            "decided_at": now_str
+        }
+
+    def get_task_proposals(self, project_id: str = None, proposed_by_id: str = None, status: str = None) -> list[dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = """
+            SELECT tp.*, p.name AS project_name, u.full_name AS proposer_name,
+                   adm.full_name AS admin_name
+            FROM task_proposals tp
+            LEFT JOIN projects p ON tp.project_id = p.project_id
+            LEFT JOIN users u ON tp.proposed_by_id = u.user_id
+            LEFT JOIN users adm ON tp.admin_id = adm.user_id
+            WHERE 1=1
+            """
+            params = []
+            if project_id:
+                query += " AND tp.project_id = ?"
+                params.append(project_id)
+            if proposed_by_id:
+                query += " AND tp.proposed_by_id = ?"
+                params.append(proposed_by_id)
+            if status:
+                query += " AND tp.status = ?"
+                params.append(status)
+            query += " ORDER BY tp.created_at DESC"
+            cursor.execute(query, tuple(params))
+            return [dict(r) for r in cursor.fetchall()]
+
 
 
 class ClientQueueDBManager:

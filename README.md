@@ -38,6 +38,13 @@
   - Top navigation bar dynamically displays current employee name and user ID (e.g., `Employee: Eng. Abdelrahman (1001)`).
   - Built-in **Logout** dialog allowing clean session termination and instant return to the Login screen.
 
+- **Task Proposal Workflow & Audit Sequence Timeline**:
+  - **Employee Task Proposal**: Team Heads can propose new tasks directly from their workstation for assigned projects with auto-generated task IDs (e.g. `TSK-04`).
+  - **Admin Approval Control**: Tasks remain in `PENDING` status until Admin reviews them. Admin can approve or reject with a mandatory feedback reason.
+  - **Shared Audit Sequence Timeline**: Both Head employees and Admins have access to a real-time Audit Timeline tracking every request from submission to decision, including proposer, timestamps, status badges, and feedback.
+  - **Origin Attribution**: Approved tasks become immediately available to all team members assigned to the project, clearly annotated with `[By: Proposer Name]`.
+  - **Live Push Alerts**: Instant WebSocket notification and UI toast alerts dispatched to both Admin and Head when proposals are submitted, approved, or rejected.
+
 ---
 
 ## Deployment & Setup Guide (LAN Network Deployment)

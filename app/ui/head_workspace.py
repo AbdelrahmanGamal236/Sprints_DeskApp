@@ -5,13 +5,85 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QComboBox, QDateEdit, QTextEdit, QPushButton, QFrame, 
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter,
-    QRadioButton, QButtonGroup, QMessageBox
+    QRadioButton, QButtonGroup, QMessageBox, QDialog, QLineEdit,
+    QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget
 )
 from app.core.config import PROGRESS_STAGES, ENTRY_TYPE_NEW, ENTRY_TYPE_CONTINUATION, ENTRY_TYPE_REVISION
 from app.database.db_manager import DBManager
 from app.network.client import NetworkClient
 from app.services.sync_service import SyncService
 from app.ui.components import ToastNotifier, SyncStatusBadge, BlockingCenterModal, CopyrightFooter
+
+
+class TaskProposalDialog(QDialog):
+    """Modal dialog for Head to propose a new task for an assigned project."""
+    def __init__(self, parent, projects: list, db_manager: DBManager):
+        super().__init__(parent)
+        self.db = db_manager
+        self.projects = projects
+        self.setWindowTitle("Propose New Task Request")
+        self.setFixedSize(500, 320)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        title = QLabel("Request New Task for Project", self)
+        title.setObjectName("SubTitle")
+        layout.addWidget(title)
+
+        layout.addWidget(QLabel("Select Project:", self, objectName="FieldLabel"))
+        self.cmb_proj = QComboBox(self)
+        for p in self.projects:
+            self.cmb_proj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
+        self.cmb_proj.currentIndexChanged.connect(self.update_task_id_preview)
+        layout.addWidget(self.cmb_proj)
+
+        layout.addWidget(QLabel("Proposed Task Name:", self, objectName="FieldLabel"))
+        self.txt_task_name = QLineEdit(self)
+        self.txt_task_name.setPlaceholderText("e.g. Router & Switch Configuration - Rack 2")
+        layout.addWidget(self.txt_task_name)
+
+        self.lbl_task_id_preview = QLabel("", self)
+        self.lbl_task_id_preview.setStyleSheet("color: #7C3AED; font-weight: bold; font-size: 12px;")
+        layout.addWidget(self.lbl_task_id_preview)
+        self.update_task_id_preview()
+
+        layout.addStretch()
+
+        btns_layout = QHBoxLayout()
+        btns_layout.addStretch()
+
+        btn_cancel = QPushButton("Cancel", self)
+        btn_cancel.clicked.connect(self.reject)
+        btns_layout.addWidget(btn_cancel)
+
+        btn_submit = QPushButton("Submit Proposal", self)
+        btn_submit.setMinimumWidth(140)
+        btn_submit.clicked.connect(self.on_submit)
+        btns_layout.addWidget(btn_submit)
+
+        layout.addLayout(btns_layout)
+
+    def update_task_id_preview(self):
+        p_id = self.cmb_proj.currentData()
+        next_id = self.db.generate_next_task_id(p_id)
+        self.lbl_task_id_preview.setText(f"System-assigned Task ID upon approval: {next_id}")
+
+    def on_submit(self):
+        name = self.txt_task_name.text().strip()
+        p_id = self.cmb_proj.currentData()
+        if not name or not p_id:
+            QMessageBox.warning(self, "Validation Error", "Please provide a valid task name and select a project.")
+            return
+        self.accept()
+
+    def get_data(self) -> dict:
+        return {
+            "project_id": self.cmb_proj.currentData(),
+            "task_name": self.txt_task_name.text().strip()
+        }
 
 class HeadWorkspace(QMainWindow):
     """Employee / Head Workstation Form and Daily Progress Logger."""
@@ -91,9 +163,18 @@ class HeadWorkspace(QMainWindow):
         self.lst_projects.itemSelectionChanged.connect(self.on_project_selection_changed)
         left_layout.addWidget(self.lst_projects)
 
+        task_header_layout = QHBoxLayout()
         lbl_task = QLabel("2. Select Task:", left_widget)
         lbl_task.setObjectName("FieldLabel")
-        left_layout.addWidget(lbl_task)
+        task_header_layout.addWidget(lbl_task)
+        task_header_layout.addStretch()
+
+        btn_propose = QPushButton("+ Request Task", left_widget)
+        btn_propose.setCursor(Qt.PointingHandCursor)
+        btn_propose.clicked.connect(self.on_open_task_proposal_dialog)
+        task_header_layout.addWidget(btn_propose)
+
+        left_layout.addLayout(task_header_layout)
 
         self.lst_tasks = QListWidget(left_widget)
         self.lst_tasks.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -187,17 +268,25 @@ class HeadWorkspace(QMainWindow):
         splitter.setSizes([320, 580])
 
         form_layout.addWidget(splitter)
-        main_layout.addWidget(form_card)
+
+        # Tabs for Form and Audit Sequence Timeline
+        tabs = QTabWidget(self)
+        tabs.addTab(form_card, "Daily Progress Logging")
+        tabs.addTab(self.create_timeline_tab(), "Task Request Sequence Timeline")
+        main_layout.addWidget(tabs)
+
         main_layout.addWidget(CopyrightFooter(self))
 
         # Bind Network Signals
         self.net_client.connection_status_changed.connect(self.on_net_status_changed)
         self.net_client.initial_snapshot_received.connect(self.on_initial_snapshot)
         self.net_client.priority_alert_received.connect(self.on_priority_alert)
+        self.net_client.task_proposal_event.connect(self.on_task_proposal_event)
         self.net_client.global_refresh_received.connect(self.reload_local_data)
 
         # Load initial local DB data
         self.reload_local_data()
+        self.reload_timeline_data()
 
     def reload_local_data(self):
         """Loads assigned projects & tasks from SQLite database."""
@@ -210,10 +299,16 @@ class HeadWorkspace(QMainWindow):
             """, (self.user_id,))
             self.projects_data = [dict(row) for row in cursor.fetchall()]
 
-            cursor.execute("SELECT * FROM tasks WHERE is_hidden = 0")
+            cursor.execute("""
+            SELECT t.*, u.full_name AS proposer_name 
+            FROM tasks t
+            LEFT JOIN users u ON t.proposed_by_id = u.user_id
+            WHERE t.is_hidden = 0
+            """)
             self.tasks_data = [dict(row) for row in cursor.fetchall()]
 
         self.populate_project_list()
+        self.reload_timeline_data()
 
     def populate_project_list(self):
         self.lst_projects.clear()
@@ -229,7 +324,9 @@ class HeadWorkspace(QMainWindow):
         self.lst_tasks.clear()
         for t in self.tasks_data:
             if t["project_id"] in selected_project_ids:
-                item = QListWidgetItem(f"{t['name']} ({t['task_id']})")
+                prop_by = t.get("proposer_name") or t.get("proposed_by_id")
+                prop_str = f" [By: {prop_by}]" if prop_by else ""
+                item = QListWidgetItem(f"{t['name']} ({t['task_id']}){prop_str}")
                 item.setData(Qt.UserRole, t["task_id"])
                 item.setData(Qt.UserRole + 1, t["project_id"])
                 self.lst_tasks.addItem(item)
@@ -365,6 +462,95 @@ class HeadWorkspace(QMainWindow):
             is_connected = self.net_client.is_connected
         pending_cnt = self.sync_service.get_pending_queue_count()
         self.sync_badge.update_status(is_connected, status_msg, pending_cnt)
+
+    def create_timeline_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        header_layout = QHBoxLayout()
+        title = QLabel("Audit Sequence Timeline - Task Requests & Approvals", widget)
+        title.setObjectName("SubTitle")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+
+        btn_refresh = QPushButton("Refresh Timeline", widget)
+        btn_refresh.clicked.connect(self.reload_timeline_data)
+        header_layout.addWidget(btn_refresh)
+
+        btn_propose_t = QPushButton("+ Request New Task", widget)
+        btn_propose_t.clicked.connect(self.on_open_task_proposal_dialog)
+        header_layout.addWidget(btn_propose_t)
+
+        layout.addLayout(header_layout)
+
+        self.tbl_timeline = QTableWidget(0, 7)
+        self.tbl_timeline.setHorizontalHeaderLabels([
+            "Request ID", "Task ID", "Project", "Task Name", "Submitted At", "Status", "Decision & Feedback"
+        ])
+        self.tbl_timeline.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.tbl_timeline)
+        return widget
+
+    def reload_timeline_data(self):
+        proposals = self.db.get_task_proposals(proposed_by_id=self.user_id)
+        self.tbl_timeline.setRowCount(0)
+        for r_idx, p in enumerate(proposals):
+            self.tbl_timeline.insertRow(r_idx)
+            self.tbl_timeline.setItem(r_idx, 0, QTableWidgetItem(p["proposal_id"]))
+            self.tbl_timeline.setItem(r_idx, 1, QTableWidgetItem(p["task_id"] or "Pending..."))
+            self.tbl_timeline.setItem(r_idx, 2, QTableWidgetItem(p["project_name"] or p["project_id"]))
+            self.tbl_timeline.setItem(r_idx, 3, QTableWidgetItem(p["task_name"]))
+            self.tbl_timeline.setItem(r_idx, 4, QTableWidgetItem(p["created_at"]))
+
+            status_item = QTableWidgetItem(p["status"])
+            if p["status"] == "APPROVED":
+                status_item.setForeground(Qt.green)
+                dec_text = f"Approved by Admin ({p['admin_name'] or p['admin_id'] or 'admin'}) on {p['decided_at'] or ''}"
+            elif p["status"] == "REJECTED":
+                status_item.setForeground(Qt.red)
+                dec_text = f"Rejected on {p['decided_at'] or ''}: {p['rejection_reason'] or 'No reason provided'}"
+            else:
+                status_item.setForeground(Qt.yellow)
+                dec_text = "Pending Admin review..."
+
+            self.tbl_timeline.setItem(r_idx, 5, status_item)
+            self.tbl_timeline.setItem(r_idx, 6, QTableWidgetItem(dec_text))
+
+    def on_open_task_proposal_dialog(self):
+        if not self.projects_data:
+            self.toast.show_message("You have no assigned projects to request tasks for.", is_warning=True)
+            return
+
+        dlg = TaskProposalDialog(self, self.projects_data, self.db)
+        if dlg.exec() == QDialog.Accepted:
+            data = dlg.get_data()
+            try:
+                self.net_client.send_action("PROPOSE_TASK", {
+                    "project_id": data["project_id"],
+                    "task_name": data["task_name"],
+                    "proposed_by_id": self.user_id
+                })
+                self.toast.show_message(f"Task proposal for '{data['task_name']}' submitted! Waiting for Admin approval.")
+                self.reload_timeline_data()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to submit task proposal: {e}")
+
+    def on_task_proposal_event(self, data: dict):
+        prop = data.get("proposal", {})
+        msg_type = data.get("type")
+        if msg_type == "TASK_PROPOSAL_DECIDED_EVENT":
+            status = prop.get("status")
+            name = prop.get("task_name")
+            p_user = prop.get("proposed_by_id")
+            if p_user == self.user_id:
+                if status == "APPROVED":
+                    self.toast.show_message(f"Admin approved your task proposal: '{name}'!")
+                else:
+                    self.toast.show_message(f"Admin rejected task proposal: '{name}'", is_warning=True)
+        self.reload_local_data()
+        self.reload_timeline_data()
 
     def on_logout(self):
         confirm = QMessageBox.question(
