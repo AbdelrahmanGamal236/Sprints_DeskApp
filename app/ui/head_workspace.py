@@ -324,8 +324,14 @@ class HeadWorkspace(QMainWindow):
         self.lst_tasks.clear()
         for t in self.tasks_data:
             if t["project_id"] in selected_project_ids:
-                prop_by = t.get("proposer_name") or t.get("proposed_by_id")
-                prop_str = f" [By: {prop_by}]" if prop_by else ""
+                p_name = t.get("proposer_name")
+                p_id = t.get("proposed_by_id")
+                if p_name and p_id:
+                    prop_str = f" [By: {p_name} ({p_id})]"
+                elif p_id:
+                    prop_str = f" [By: {p_id}]"
+                else:
+                    prop_str = ""
                 item = QListWidgetItem(f"{t['name']} ({t['task_id']}){prop_str}")
                 item.setData(Qt.UserRole, t["task_id"])
                 item.setData(Qt.UserRole + 1, t["project_id"])

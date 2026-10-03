@@ -77,6 +77,11 @@ class SuperAdminWorkspace(QMainWindow):
         self.txt_user_id.setPlaceholderText("e.g. admin2, coo2")
         f_layout.addWidget(self.txt_user_id)
 
+        f_layout.addWidget(QLabel("Full Name:", objectName="FieldLabel"))
+        self.txt_full_name = QLineEdit()
+        self.txt_full_name.setPlaceholderText("e.g. Eng. Tarek Omar")
+        f_layout.addWidget(self.txt_full_name)
+
         f_layout.addWidget(QLabel("Role:", objectName="FieldLabel"))
         self.cmb_role = QComboBox()
         for r in ALL_ROLES:
@@ -94,10 +99,10 @@ class SuperAdminWorkspace(QMainWindow):
         l_layout = QVBoxLayout(list_card)
         l_layout.addWidget(QLabel("All System User Accounts", objectName="SubTitle"))
 
-        self.tbl_users = QTableWidget(0, 4)
-        self.tbl_users.setHorizontalHeaderLabels(["User ID", "Role", "Must Reset Pass?", "Actions"])
+        self.tbl_users = QTableWidget(0, 5)
+        self.tbl_users.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Must Reset Pass?", "Actions"])
         self.tbl_users.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tbl_users.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.tbl_users.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.tbl_users.verticalHeader().setDefaultSectionSize(40)
         l_layout.addWidget(self.tbl_users)
 
@@ -107,10 +112,11 @@ class SuperAdminWorkspace(QMainWindow):
 
     def on_create_user(self):
         u_id = self.txt_user_id.text().strip()
+        f_name = self.txt_full_name.text().strip()
         role = self.cmb_role.currentText()
 
-        if not u_id:
-            QMessageBox.warning(self, "Error", "User ID cannot be empty.")
+        if not u_id or not f_name:
+            QMessageBox.warning(self, "Error", "User ID and Full Name are required.")
             return
 
         pwd_hash, pwd_salt = hash_password(u_id) # Initial pass = ID
@@ -123,13 +129,14 @@ class SuperAdminWorkspace(QMainWindow):
                 return
 
             cursor.execute("""
-            INSERT INTO users (user_id, password_hash, password_salt, role, must_change_password)
-            VALUES (?, ?, ?, ?, 1)
-            """, (u_id, pwd_hash, pwd_salt, role))
+            INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
+            VALUES (?, ?, ?, ?, ?, 1)
+            """, (u_id, f_name, pwd_hash, pwd_salt, role))
             conn.commit()
 
         self.txt_user_id.clear()
-        self.toast.show_message(f"User account '{u_id}' ({role}) created successfully!")
+        self.txt_full_name.clear()
+        self.toast.show_message(f"User account '{f_name}' ({u_id} - {role}) created successfully!")
         self.reload_accounts()
 
     def on_reset_user_pass(self, user_id: str):
@@ -154,13 +161,14 @@ class SuperAdminWorkspace(QMainWindow):
         for r_idx, u in enumerate(users):
             self.tbl_users.insertRow(r_idx)
             self.tbl_users.setItem(r_idx, 0, QTableWidgetItem(u["user_id"]))
-            self.tbl_users.setItem(r_idx, 1, QTableWidgetItem(u["role"]))
-            self.tbl_users.setItem(r_idx, 2, QTableWidgetItem("Yes" if u["must_change_password"] else "No"))
+            self.tbl_users.setItem(r_idx, 1, QTableWidgetItem(u["full_name"] or u["user_id"]))
+            self.tbl_users.setItem(r_idx, 2, QTableWidgetItem(u["role"]))
+            self.tbl_users.setItem(r_idx, 3, QTableWidgetItem("Yes" if u["must_change_password"] else "No"))
 
             btn_reset = QPushButton("Reset Pass")
             btn_reset.setMinimumWidth(85)
             btn_reset.clicked.connect(lambda _, uid=u["user_id"]: self.on_reset_user_pass(uid))
-            self.tbl_users.setCellWidget(r_idx, 3, btn_reset)
+            self.tbl_users.setCellWidget(r_idx, 4, btn_reset)
 
     def on_logout(self):
         confirm = QMessageBox.question(

@@ -90,6 +90,11 @@ class AdminWorkspace(QMainWindow):
         self.txt_emp_id.setPlaceholderText("e.g. 1002, 1003")
         f_layout.addWidget(self.txt_emp_id)
 
+        f_layout.addWidget(QLabel("Employee Full Name:", objectName="FieldLabel"))
+        self.txt_emp_name = QLineEdit()
+        self.txt_emp_name.setPlaceholderText("e.g. Eng. Mohamed Ali")
+        f_layout.addWidget(self.txt_emp_name)
+
         btn_add_emp = QPushButton("Add Employee")
         btn_add_emp.clicked.connect(self.on_add_employee)
         f_layout.addWidget(btn_add_emp)
@@ -101,10 +106,10 @@ class AdminWorkspace(QMainWindow):
         l_layout = QVBoxLayout(list_card)
         l_layout.addWidget(QLabel("Existing Employees (Head)", objectName="SubTitle"))
 
-        self.tbl_employees = QTableWidget(0, 3)
-        self.tbl_employees.setHorizontalHeaderLabels(["Employee ID", "Role", "Actions"])
+        self.tbl_employees = QTableWidget(0, 4)
+        self.tbl_employees.setHorizontalHeaderLabels(["Employee ID", "Full Name", "Role", "Actions"])
         self.tbl_employees.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tbl_employees.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tbl_employees.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.tbl_employees.verticalHeader().setDefaultSectionSize(40)
         l_layout.addWidget(self.tbl_employees)
 
@@ -114,8 +119,9 @@ class AdminWorkspace(QMainWindow):
 
     def on_add_employee(self):
         emp_id = self.txt_emp_id.text().strip()
-        if not emp_id:
-            QMessageBox.warning(self, "Error", "Employee ID cannot be empty.")
+        emp_name = self.txt_emp_name.text().strip()
+        if not emp_id or not emp_name:
+            QMessageBox.warning(self, "Error", "Employee ID and Full Name are required.")
             return
 
         pwd_hash, pwd_salt = hash_password(emp_id) # Initial password = ID
@@ -127,13 +133,14 @@ class AdminWorkspace(QMainWindow):
                 return
 
             cursor.execute("""
-            INSERT INTO users (user_id, password_hash, password_salt, role, must_change_password)
-            VALUES (?, ?, ?, ?, 1)
-            """, (emp_id, pwd_hash, pwd_salt, ROLE_HEAD))
+            INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
+            VALUES (?, ?, ?, ?, ?, 1)
+            """, (emp_id, emp_name, pwd_hash, pwd_salt, ROLE_HEAD))
             conn.commit()
 
         self.txt_emp_id.clear()
-        self.toast.show_message(f"Employee '{emp_id}' added successfully! Default password = '{emp_id}'.")
+        self.txt_emp_name.clear()
+        self.toast.show_message(f"Employee '{emp_name}' ({emp_id}) added successfully! Default password = '{emp_id}'.")
         self.reload_all_data()
         self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "EMPLOYEE_ADDED"})
 
@@ -510,12 +517,13 @@ class AdminWorkspace(QMainWindow):
             for r_idx, emp in enumerate(employees):
                 self.tbl_employees.insertRow(r_idx)
                 self.tbl_employees.setItem(r_idx, 0, QTableWidgetItem(emp["user_id"]))
-                self.tbl_employees.setItem(r_idx, 1, QTableWidgetItem(emp["role"]))
+                self.tbl_employees.setItem(r_idx, 1, QTableWidgetItem(emp["full_name"] or emp["user_id"]))
+                self.tbl_employees.setItem(r_idx, 2, QTableWidgetItem(emp["role"]))
 
                 btn_rst = QPushButton("Reset Pass")
                 btn_rst.setMinimumWidth(85)
                 btn_rst.clicked.connect(lambda _, eid=emp["user_id"]: self.on_reset_password(eid))
-                self.tbl_employees.setCellWidget(r_idx, 2, btn_rst)
+                self.tbl_employees.setCellWidget(r_idx, 3, btn_rst)
 
             # Projects
             cursor.execute("SELECT * FROM projects")
@@ -559,7 +567,12 @@ class AdminWorkspace(QMainWindow):
                 self.tbl_tasks.setItem(r_idx, 1, QTableWidgetItem(t["project_name"] or t["project_id"]))
                 self.tbl_tasks.setItem(r_idx, 2, QTableWidgetItem(t["name"]))
 
-                prop_by = t["proposer_name"] or t["proposed_by_id"] or "Admin (Direct)"
+                if t["proposer_name"]:
+                    prop_by = f"{t['proposer_name']} ({t['proposed_by_id']})"
+                elif t["proposed_by_id"]:
+                    prop_by = t["proposed_by_id"]
+                else:
+                    prop_by = "Admin (Direct)"
                 self.tbl_tasks.setItem(r_idx, 3, QTableWidgetItem(prop_by))
                 
                 t_status = "Hidden" if t["is_hidden"] else "Active"
@@ -583,7 +596,11 @@ class AdminWorkspace(QMainWindow):
             self.tbl_pending_proposals.setItem(r_idx, 1, QTableWidgetItem(p["task_id"] or "Pending..."))
             self.tbl_pending_proposals.setItem(r_idx, 2, QTableWidgetItem(p["project_name"] or p["project_id"]))
             self.tbl_pending_proposals.setItem(r_idx, 3, QTableWidgetItem(p["task_name"]))
-            self.tbl_pending_proposals.setItem(r_idx, 4, QTableWidgetItem(f"{p['proposer_name'] or p['proposed_by_id']} ({p['proposed_by_id']})"))
+            
+            p_name = p.get("proposer_name")
+            p_id = p.get("proposed_by_id")
+            prop_display = f"{p_name} ({p_id})" if p_name else p_id
+            self.tbl_pending_proposals.setItem(r_idx, 4, QTableWidgetItem(prop_display))
             self.tbl_pending_proposals.setItem(r_idx, 5, QTableWidgetItem(p["created_at"]))
 
             act_widget = QWidget()
@@ -620,7 +637,11 @@ class AdminWorkspace(QMainWindow):
             self.tbl_proposals_timeline.setItem(r_idx, 1, QTableWidgetItem(p["task_id"] or "Pending..."))
             self.tbl_proposals_timeline.setItem(r_idx, 2, QTableWidgetItem(p["project_name"] or p["project_id"]))
             self.tbl_proposals_timeline.setItem(r_idx, 3, QTableWidgetItem(p["task_name"]))
-            self.tbl_proposals_timeline.setItem(r_idx, 4, QTableWidgetItem(f"{p['proposer_name'] or p['proposed_by_id']} ({p['proposed_by_id']})"))
+            
+            p_name = p.get("proposer_name")
+            p_id = p.get("proposed_by_id")
+            prop_display = f"{p_name} ({p_id})" if p_name else p_id
+            self.tbl_proposals_timeline.setItem(r_idx, 4, QTableWidgetItem(prop_display))
             self.tbl_proposals_timeline.setItem(r_idx, 5, QTableWidgetItem(p["created_at"]))
 
             st_item = QTableWidgetItem(p["status"])

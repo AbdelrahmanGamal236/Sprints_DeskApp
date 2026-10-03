@@ -38,6 +38,12 @@ class DBManager:
             if "full_name" not in user_cols:
                 cursor.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
 
+            # Ensure default users have full names
+            cursor.execute("UPDATE users SET full_name = 'Eng. Abdelrahman' WHERE user_id = '1001' AND (full_name IS NULL OR full_name = '')")
+            cursor.execute("UPDATE users SET full_name = 'Admin Manager' WHERE user_id = 'admin' AND (full_name IS NULL OR full_name = '')")
+            cursor.execute("UPDATE users SET full_name = 'Chief Operating Officer' WHERE user_id = 'coo' AND (full_name IS NULL OR full_name = '')")
+            cursor.execute("UPDATE users SET full_name = 'System Super Admin' WHERE user_id = 'superadmin' AND (full_name IS NULL OR full_name = '')")
+
             # Projects table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS projects (
@@ -156,8 +162,8 @@ class DBManager:
             if not cursor.fetchone():
                 pwd_hash, pwd_salt = hash_password("superadmin")
                 cursor.execute(
-                    "INSERT INTO users (user_id, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?)",
-                    ("superadmin", pwd_hash, pwd_salt, ROLE_SUPER_ADMIN, 0)
+                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("superadmin", "System Super Admin", pwd_hash, pwd_salt, ROLE_SUPER_ADMIN, 0)
                 )
 
             # Check default admin
@@ -165,8 +171,8 @@ class DBManager:
             if not cursor.fetchone():
                 pwd_hash, pwd_salt = hash_password("admin")
                 cursor.execute(
-                    "INSERT INTO users (user_id, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?)",
-                    ("admin", pwd_hash, pwd_salt, ROLE_ADMIN, 0)
+                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("admin", "Admin Manager", pwd_hash, pwd_salt, ROLE_ADMIN, 0)
                 )
 
             # Check default coo
@@ -174,8 +180,8 @@ class DBManager:
             if not cursor.fetchone():
                 pwd_hash, pwd_salt = hash_password("coo")
                 cursor.execute(
-                    "INSERT INTO users (user_id, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?)",
-                    ("coo", pwd_hash, pwd_salt, ROLE_COO, 0)
+                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("coo", "Chief Operating Officer", pwd_hash, pwd_salt, ROLE_COO, 0)
                 )
 
             # Check default sample employee (Head 1001)
@@ -183,8 +189,8 @@ class DBManager:
             if not cursor.fetchone():
                 pwd_hash, pwd_salt = hash_password("1001")
                 cursor.execute(
-                    "INSERT INTO users (user_id, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?)",
-                    ("1001", pwd_hash, pwd_salt, ROLE_HEAD, 1)
+                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("1001", "Eng. Abdelrahman", pwd_hash, pwd_salt, ROLE_HEAD, 1)
                 )
 
             # Check sample projects
