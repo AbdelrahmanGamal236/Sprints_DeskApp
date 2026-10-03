@@ -490,6 +490,7 @@ class HeadWorkspace(QMainWindow):
             "Request ID", "Task ID", "Project", "Task Name", "Submitted At", "Status", "Decision & Feedback"
         ])
         self.tbl_timeline.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_timeline.verticalHeader().setDefaultSectionSize(38)
         layout.addWidget(self.tbl_timeline)
         return widget
 

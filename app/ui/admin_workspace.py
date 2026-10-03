@@ -104,6 +104,8 @@ class AdminWorkspace(QMainWindow):
         self.tbl_employees = QTableWidget(0, 3)
         self.tbl_employees.setHorizontalHeaderLabels(["Employee ID", "Role", "Actions"])
         self.tbl_employees.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_employees.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tbl_employees.verticalHeader().setDefaultSectionSize(40)
         l_layout.addWidget(self.tbl_employees)
 
         layout.addWidget(form_card, 1)
@@ -189,6 +191,8 @@ class AdminWorkspace(QMainWindow):
         self.tbl_projects = QTableWidget(0, 4)
         self.tbl_projects.setHorizontalHeaderLabels(["ID", "Name", "Status", "Actions"])
         self.tbl_projects.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_projects.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.tbl_projects.verticalHeader().setDefaultSectionSize(40)
         l_layout.addWidget(self.tbl_projects)
 
         layout.addWidget(form_card, 1)
@@ -300,6 +304,8 @@ class AdminWorkspace(QMainWindow):
         self.tbl_tasks = QTableWidget(0, 6)
         self.tbl_tasks.setHorizontalHeaderLabels(["ID", "Project", "Name", "Origin / Proposed By", "Status", "Actions"])
         self.tbl_tasks.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_tasks.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.tbl_tasks.verticalHeader().setDefaultSectionSize(40)
         l_layout.addWidget(self.tbl_tasks)
 
         layout.addWidget(form_card, 1)
@@ -324,6 +330,8 @@ class AdminWorkspace(QMainWindow):
             "Request ID", "Task ID", "Project", "Proposed Task Name", "Proposed By", "Submitted At", "Actions"
         ])
         self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.tbl_pending_proposals.verticalHeader().setDefaultSectionSize(44)
         layout.addWidget(self.tbl_pending_proposals)
         return widget
 
@@ -345,6 +353,7 @@ class AdminWorkspace(QMainWindow):
             "Request ID", "Task ID", "Project", "Task Name", "Proposed By", "Submitted At", "Status", "Decision & Feedback"
         ])
         self.tbl_proposals_timeline.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_proposals_timeline.verticalHeader().setDefaultSectionSize(38)
         layout.addWidget(self.tbl_proposals_timeline)
         return widget
 
@@ -504,6 +513,7 @@ class AdminWorkspace(QMainWindow):
                 self.tbl_employees.setItem(r_idx, 1, QTableWidgetItem(emp["role"]))
 
                 btn_rst = QPushButton("Reset Pass")
+                btn_rst.setMinimumWidth(85)
                 btn_rst.clicked.connect(lambda _, eid=emp["user_id"]: self.on_reset_password(eid))
                 self.tbl_employees.setCellWidget(r_idx, 2, btn_rst)
 
@@ -524,6 +534,7 @@ class AdminWorkspace(QMainWindow):
                 self.tbl_projects.setItem(r_idx, 2, QTableWidgetItem(status_str))
 
                 btn_hide = QPushButton("Unhide" if p["is_hidden"] else "Hide / Delete")
+                btn_hide.setMinimumWidth(95)
                 if not p["is_hidden"]:
                     btn_hide.setObjectName("DangerButton")
                 btn_hide.clicked.connect(lambda _, pid=p["project_id"], h=p["is_hidden"]: self.on_toggle_hide_project(pid, h))
@@ -555,6 +566,7 @@ class AdminWorkspace(QMainWindow):
                 self.tbl_tasks.setItem(r_idx, 4, QTableWidgetItem(t_status))
 
                 btn_t_hide = QPushButton("Unhide" if t["is_hidden"] else "Hide / Delete")
+                btn_t_hide.setMinimumWidth(95)
                 if not t["is_hidden"]:
                     btn_t_hide.setObjectName("DangerButton")
                 btn_t_hide.clicked.connect(lambda _, tid=t["task_id"], h=t["is_hidden"]: self.on_toggle_hide_task(tid, h))
@@ -575,16 +587,20 @@ class AdminWorkspace(QMainWindow):
             self.tbl_pending_proposals.setItem(r_idx, 5, QTableWidgetItem(p["created_at"]))
 
             act_widget = QWidget()
+            act_widget.setStyleSheet("background: transparent;")
             act_layout = QHBoxLayout(act_widget)
-            act_layout.setContentsMargins(4, 2, 4, 2)
-            act_layout.setSpacing(6)
+            act_layout.setContentsMargins(6, 2, 6, 2)
+            act_layout.setSpacing(8)
 
             btn_app = QPushButton("Approve")
+            btn_app.setObjectName("SuccessButton")
+            btn_app.setMinimumWidth(75)
             btn_app.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_approve_proposal(pid))
             act_layout.addWidget(btn_app)
 
             btn_rej = QPushButton("Reject")
             btn_rej.setObjectName("DangerButton")
+            btn_rej.setMinimumWidth(70)
             btn_rej.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_reject_proposal(pid))
             act_layout.addWidget(btn_rej)
 

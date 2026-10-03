@@ -97,6 +97,8 @@ class SuperAdminWorkspace(QMainWindow):
         self.tbl_users = QTableWidget(0, 4)
         self.tbl_users.setHorizontalHeaderLabels(["User ID", "Role", "Must Reset Pass?", "Actions"])
         self.tbl_users.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_users.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.tbl_users.verticalHeader().setDefaultSectionSize(40)
         l_layout.addWidget(self.tbl_users)
 
         layout.addWidget(form_card, 1)
@@ -156,6 +158,7 @@ class SuperAdminWorkspace(QMainWindow):
             self.tbl_users.setItem(r_idx, 2, QTableWidgetItem("Yes" if u["must_change_password"] else "No"))
 
             btn_reset = QPushButton("Reset Pass")
+            btn_reset.setMinimumWidth(85)
             btn_reset.clicked.connect(lambda _, uid=u["user_id"]: self.on_reset_user_pass(uid))
             self.tbl_users.setCellWidget(r_idx, 3, btn_reset)
 

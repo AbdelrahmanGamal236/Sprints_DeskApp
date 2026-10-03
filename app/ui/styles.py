@@ -92,6 +92,7 @@ QPushButton:disabled {
 
 QPushButton#DangerButton {
     background-color: #EF4444;
+    color: #FFFFFF;
 }
 
 QPushButton#DangerButton:hover {
@@ -100,9 +101,44 @@ QPushButton#DangerButton:hover {
 
 QPushButton#SuccessButton {
     background-color: #10B981;
+    color: #FFFFFF;
 }
 
 QPushButton#SuccessButton:hover {
+    background-color: #059669;
+}
+
+/* Table Specific Action Buttons */
+QTableWidget QPushButton {
+    background-color: #8B5CF6;
+    color: #FFFFFF;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    min-height: 24px;
+    border: none;
+}
+
+QTableWidget QPushButton:hover {
+    background-color: #7C3AED;
+}
+
+QTableWidget QPushButton#DangerButton {
+    background-color: #EF4444;
+    color: #FFFFFF;
+}
+
+QTableWidget QPushButton#DangerButton:hover {
+    background-color: #DC2626;
+}
+
+QTableWidget QPushButton#SuccessButton {
+    background-color: #10B981;
+    color: #FFFFFF;
+}
+
+QTableWidget QPushButton#SuccessButton:hover {
     background-color: #059669;
 }
 
