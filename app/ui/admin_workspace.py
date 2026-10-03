@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QComboBox, QTabWidget, QMessageBox, QFileDialog, QTableWidget, 
     QTableWidgetItem, QHeaderView, QInputDialog
 )
-from app.core.config import ROLE_HEAD
+from app.core.config import ROLE_HEAD, ROLE_COO, ROLE_ADMIN
 from app.core.auth import hash_password
 from app.database.db_manager import DBManager
 from app.network.client import NetworkClient
@@ -49,8 +49,8 @@ class AdminWorkspace(QMainWindow):
         # Tab Widget
         tabs = QTabWidget(self)
 
-        # Tab 1: Employee Management
-        tabs.addTab(self.create_employee_tab(), "Manage Employees")
+        # Tab 1: User & Employee Management
+        tabs.addTab(self.create_employee_tab(), "Manage Users & Employees")
 
         # Tab 2: Project Management
         tabs.addTab(self.create_project_tab(), "Manage Projects")
@@ -83,19 +83,26 @@ class AdminWorkspace(QMainWindow):
         form_card.setObjectName("CardFrame")
         f_layout = QVBoxLayout(form_card)
 
-        f_layout.addWidget(QLabel("Add New Employee", objectName="SubTitle"))
+        f_layout.addWidget(QLabel("Add New User / Employee", objectName="SubTitle"))
 
-        f_layout.addWidget(QLabel("Employee ID / Badge Number:", objectName="FieldLabel"))
+        f_layout.addWidget(QLabel("User / Employee ID:", objectName="FieldLabel"))
         self.txt_emp_id = QLineEdit()
-        self.txt_emp_id.setPlaceholderText("e.g. 1002, 1003")
+        self.txt_emp_id.setPlaceholderText("e.g. 1002, coo2")
         f_layout.addWidget(self.txt_emp_id)
 
-        f_layout.addWidget(QLabel("Employee Full Name:", objectName="FieldLabel"))
+        f_layout.addWidget(QLabel("Full Name:", objectName="FieldLabel"))
         self.txt_emp_name = QLineEdit()
         self.txt_emp_name.setPlaceholderText("e.g. Eng. Mohamed Ali")
         f_layout.addWidget(self.txt_emp_name)
 
-        btn_add_emp = QPushButton("Add Employee")
+        f_layout.addWidget(QLabel("Assign Role:", objectName="FieldLabel"))
+        self.cmb_emp_role = QComboBox()
+        self.cmb_emp_role.addItem("HEAD (Team Head / Employee)", ROLE_HEAD)
+        self.cmb_emp_role.addItem("COO (Chief Operating Officer)", ROLE_COO)
+        self.cmb_emp_role.addItem("ADMIN (System Administrator)", ROLE_ADMIN)
+        f_layout.addWidget(self.cmb_emp_role)
+
+        btn_add_emp = QPushButton("Create User Account")
         btn_add_emp.clicked.connect(self.on_add_employee)
         f_layout.addWidget(btn_add_emp)
         f_layout.addStretch()
@@ -104,10 +111,10 @@ class AdminWorkspace(QMainWindow):
         list_card = QFrame()
         list_card.setObjectName("CardFrame")
         l_layout = QVBoxLayout(list_card)
-        l_layout.addWidget(QLabel("Existing Employees (Head)", objectName="SubTitle"))
+        l_layout.addWidget(QLabel("System Users & Employees", objectName="SubTitle"))
 
         self.tbl_employees = QTableWidget(0, 4)
-        self.tbl_employees.setHorizontalHeaderLabels(["Employee ID", "Full Name", "Role", "Actions"])
+        self.tbl_employees.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Actions"])
         self.tbl_employees.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl_employees.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.tbl_employees.verticalHeader().setDefaultSectionSize(40)
@@ -120,8 +127,10 @@ class AdminWorkspace(QMainWindow):
     def on_add_employee(self):
         emp_id = self.txt_emp_id.text().strip()
         emp_name = self.txt_emp_name.text().strip()
+        role = self.cmb_emp_role.currentData()
+
         if not emp_id or not emp_name:
-            QMessageBox.warning(self, "Error", "Employee ID and Full Name are required.")
+            QMessageBox.warning(self, "Error", "User ID and Full Name are required.")
             return
 
         pwd_hash, pwd_salt = hash_password(emp_id) # Initial password = ID
@@ -135,19 +144,27 @@ class AdminWorkspace(QMainWindow):
             cursor.execute("""
             INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
             VALUES (?, ?, ?, ?, ?, 1)
-            """, (emp_id, emp_name, pwd_hash, pwd_salt, ROLE_HEAD))
+            """, (emp_id, emp_name, pwd_hash, pwd_salt, role))
+
+            # If assigning a HEAD, auto-assign to active projects
+            if role == ROLE_HEAD:
+                cursor.execute("SELECT project_id FROM projects WHERE is_hidden = 0")
+                for p in cursor.fetchall():
+                    cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)",
+                                   (emp_id, p["project_id"]))
+
             conn.commit()
 
         self.txt_emp_id.clear()
         self.txt_emp_name.clear()
-        self.toast.show_message(f"Employee '{emp_name}' ({emp_id}) added successfully! Default password = '{emp_id}'.")
+        self.toast.show_message(f"User '{emp_name}' ({emp_id} - {role}) added successfully! Default password = '{emp_id}'.")
         self.reload_all_data()
-        self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "EMPLOYEE_ADDED"})
+        self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "USER_ADDED"})
 
     def on_reset_password(self, emp_id: str):
         confirm = QMessageBox.question(
             self, "Reset Password", 
-            f"Reset password for Employee '{emp_id}' back to their User ID?",
+            f"Reset password for User '{emp_id}' back to their User ID?",
             QMessageBox.Yes | QMessageBox.No
         )
         if confirm == QMessageBox.Yes:
@@ -510,8 +527,8 @@ class AdminWorkspace(QMainWindow):
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Employees
-            cursor.execute("SELECT * FROM users WHERE role = 'HEAD'")
+            # Users & Employees (all non-superadmin)
+            cursor.execute("SELECT * FROM users WHERE user_id != 'superadmin' ORDER BY created_at ASC")
             employees = cursor.fetchall()
             self.tbl_employees.setRowCount(0)
             for r_idx, emp in enumerate(employees):
