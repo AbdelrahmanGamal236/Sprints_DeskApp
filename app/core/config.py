@@ -13,7 +13,13 @@ else:
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # DESKAPP_DATA_DIR overrides the data folder (used by tests and multi-instance local testing)
-DATA_DIR = Path(os.environ["DESKAPP_DATA_DIR"]) if os.environ.get("DESKAPP_DATA_DIR") else BASE_DIR / "data"
+if os.environ.get("DESKAPP_DATA_DIR"):
+    DATA_DIR = Path(os.environ["DESKAPP_DATA_DIR"])
+elif os.environ.get("DESKAPP_DEMO") == "1":
+    # --standalone demo mode keeps its sample data away from the real database
+    DATA_DIR = BASE_DIR / "data_demo"
+else:
+    DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 BACKUPS_DIR = DATA_DIR / "backups"
 BACKUPS_DIR.mkdir(parents=True, exist_ok=True)

@@ -1,27 +1,25 @@
-import base64
-import json
 from datetime import datetime
-from PySide6.QtCore import Qt, QDate, QSettings
+from PySide6.QtCore import Qt, QDate
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QFrame, QComboBox, QTabWidget, 
     QMessageBox, QFileDialog, QTableWidget, QTableWidgetItem, 
     QHeaderView, QInputDialog, QSplitter, QDateEdit
 )
+from app.core.settings import app_settings
 from app.core.config import ROLE_HEAD, ROLE_COO, ROLE_ADMIN, ROLE_SUPER_ADMIN
-from app.network.client import NetworkClient
+from app.network.client import NetworkClient, run_async
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_action_cell, create_table_item, KpiMetricCard
+    setup_modern_table, create_table_action_cell, create_table_item, KpiMetricCard, describe_error
 )
 from app.ui.timeline_widget import ProjectProgressiveTimelineWidget
 
 class AdminWorkspace(QMainWindow):
     """Admin Management Workspace with Discipline Organization & Server Enforcement."""
-    def __init__(self, user_dict: dict, db_manager, net_client: NetworkClient):
+    def __init__(self, user_dict: dict, net_client: NetworkClient):
         super().__init__()
         self.user = user_dict
-        self.db = db_manager
         self.net_client = net_client
         self.logout_requested = False
 
@@ -73,55 +71,55 @@ class AdminWorkspace(QMainWindow):
         self.net_client.task_proposal_event.connect(self.on_task_proposal_event)
         self.net_client.task_date_change_event.connect(self.on_task_date_change_event)
         self.net_client.global_refresh_received.connect(self.reload_all_data)
-        self.net_client.response_received.connect(self.on_server_response)
+        self.net_client.connection_status_changed.connect(lambda ok, _msg: ok and self.reload_all_data())
 
         self.reload_all_data()
 
     # ------------------- DATA RELOAD VIA SERVER (B2) -------------------
     def reload_all_data(self):
-        self.net_client.send_action("GET_DISCIPLINES", {"include_hidden": True})
-        self.net_client.send_action("GET_PROJECTS", {"include_hidden": True})
-        self.net_client.send_action("GET_TASKS", {"include_hidden": True})
-        self.net_client.send_action("GET_USERS", {})
-        self.net_client.send_action("GET_TASK_PROPOSALS", {})
-        self.net_client.send_action("GET_DATE_CHANGE_REQUESTS", {})
-        self.net_client.send_action("GET_ANALYTICS", {})
+        if not self.net_client.is_connected:
+            return
+        call = self.net_client.call
+        call("GET_DISCIPLINES", {"include_hidden": True}, self._on_disciplines, self.on_request_error)
+        call("GET_PROJECTS", {"include_hidden": True}, self._on_projects, self.on_request_error)
+        call("GET_TASKS", {"include_hidden": True}, self._on_tasks, self.on_request_error)
+        call("GET_USERS", {}, self._on_users, self.on_request_error)
+        call("GET_TASK_PROPOSALS", {}, lambda r: self.update_proposals_views(r.get("proposals", [])), self.on_request_error)
+        call("GET_DATE_CHANGE_REQUESTS", {}, lambda r: self.update_date_change_views(r.get("requests", [])), self.on_request_error)
+        call("GET_ANALYTICS", {}, lambda r: self.update_analytics_views(r.get("data", {})), self.on_request_error)
         self.on_timeline_project_selected()
 
-    def on_server_response(self, resp_type: str, data: dict):
-        if resp_type == "DISCIPLINES_RESPONSE":
-            self.disciplines_data = data.get("disciplines", [])
-            self.update_disciplines_views()
-        elif resp_type == "PROJECTS_RESPONSE":
-            self.projects_data = data.get("projects", [])
-            self.update_projects_views()
-        elif resp_type == "TASKS_RESPONSE":
-            self.tasks_data = data.get("tasks", [])
-            self.update_tasks_views()
-            self.on_timeline_project_selected()
-        elif resp_type == "USERS_RESPONSE":
-            self.users_data = data.get("users", [])
-            self.update_users_views()
-        elif resp_type == "TASK_PROPOSALS_RESPONSE":
-            self.update_proposals_views(data.get("proposals", []))
-        elif resp_type == "DATE_CHANGE_REQUESTS_RESPONSE":
-            self.update_date_change_views(data.get("requests", []))
-        elif resp_type == "ANALYTICS_RESPONSE":
-            self.update_analytics_views(data.get("data", {}))
-        elif resp_type == "PROJECT_TIMELINE_RESPONSE":
-            if hasattr(self, "timeline_widget"):
-                self.timeline_widget.load_timeline_data(data.get("data", {}))
-        elif resp_type == "EXPORT_EXCEL_RESPONSE":
-            self.handle_export_response(data)
-        elif resp_type == "ADD_TASK_RESPONSE":
-            if data.get("success"):
-                t_info = data.get("task", {})
-                t_name = t_info.get("name", "Task")
-                t_id = t_info.get("task_id", "")
-                self.toast.show_message(f"Task '{t_name}' ({t_id}) added successfully!")
-                self.reload_all_data()
-            else:
-                QMessageBox.critical(self, "Failed to Add Task", data.get("error", "An error occurred on the Central Server."))
+    def _on_disciplines(self, r):
+        self.disciplines_data = r.get("disciplines", [])
+        self.update_disciplines_views()
+
+    def _on_projects(self, r):
+        self.projects_data = r.get("projects", [])
+        self.update_projects_views()
+
+    def _on_tasks(self, r):
+        self.tasks_data = r.get("tasks", [])
+        self.update_tasks_views()
+
+    def _on_users(self, r):
+        self.users_data = r.get("users", [])
+        self.update_users_views()
+        self.update_export_heads_filter()
+
+    def on_request_error(self, exc):
+        self.toast.show_message(describe_error(exc), is_error=True)
+
+    def mutate(self, action: str, payload: dict, success_msg: str, on_ok=None, error_title: str = "Action Failed"):
+        """Send a change to the server; report the real outcome (never a success toast before the server confirms)."""
+        def ok(reply):
+            if success_msg:
+                self.toast.show_message(success_msg)
+            if on_ok:
+                on_ok(reply)
+
+        def err(exc):
+            QMessageBox.critical(self, error_title, describe_error(exc))
+        self.net_client.call(action, payload, ok, err)
 
     # ------------------- TAB 1: USERS & HEADS TAB (A3, B5) -------------------
     def create_employee_tab(self) -> QWidget:
@@ -236,15 +234,12 @@ class AdminWorkspace(QMainWindow):
             QMessageBox.warning(self, "Error", "Discipline is required for Head accounts.")
             return
 
-        self.net_client.send_action("CREATE_USER", {
-            "user_id": emp_id,
-            "full_name": emp_name,
-            "role": ROLE_HEAD,
-            "discipline_id": disc_id
-        })
-        self.txt_emp_id.clear()
-        self.txt_emp_name.clear()
-        self.toast.show_message(f"Head account creation request sent for '{emp_name}'.")
+        def created(_reply):
+            self.txt_emp_id.clear()
+            self.txt_emp_name.clear()
+        self.mutate("CREATE_USER", {"user_id": emp_id, "full_name": emp_name, "role": ROLE_HEAD, "discipline_id": disc_id},
+                    f"Head account '{emp_name}' created. Initial password is the User ID.", created,
+                    "Could Not Create Account")
 
     def on_edit_employee(self, user_id: str):
         target = next((u for u in self.users_data if u["user_id"] == user_id), None)
@@ -278,12 +273,8 @@ class AdminWorkspace(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             new_name = txt_name.text().strip()
             new_disc = cmb_disc.currentData()
-            self.net_client.send_action("UPDATE_USER", {
-                "user_id": user_id,
-                "full_name": new_name,
-                "discipline_id": new_disc
-            })
-            self.toast.show_message(f"Updated user '{user_id}'.")
+            self.mutate("UPDATE_USER", {"user_id": user_id, "full_name": new_name, "discipline_id": new_disc},
+                        f"Updated user '{user_id}'.", error_title="Could Not Update Account")
 
     def on_reset_password(self, user_id: str):
         confirm = QMessageBox.question(
@@ -292,8 +283,9 @@ class AdminWorkspace(QMainWindow):
             QMessageBox.Yes | QMessageBox.No
         )
         if confirm == QMessageBox.Yes:
-            self.net_client.send_action("RESET_PASSWORD", {"user_id": user_id})
-            self.toast.show_message(f"Password reset request sent for user '{user_id}'.")
+            self.mutate("RESET_PASSWORD", {"user_id": user_id},
+                        f"Password for '{user_id}' was reset to the User ID (must be changed at next login).",
+                        lambda r: self.reload_all_data(), "Could Not Reset Password")
 
     # ------------------- TAB 2: PROJECTS MANAGEMENT -------------------
     def create_project_tab(self) -> QWidget:
@@ -352,7 +344,13 @@ class AdminWorkspace(QMainWindow):
 
     def update_projects_views(self):
         self.tbl_projects.setRowCount(0)
+        prev_task_prj = self.cmb_task_prj.currentData()
+        prev_timeline_prj = self.cmb_timeline_prj.currentData() if hasattr(self, "cmb_timeline_prj") else None
+        self.cmb_task_prj.blockSignals(True)
         self.cmb_task_prj.clear()
+        if hasattr(self, "cmb_timeline_prj"):
+            self.cmb_timeline_prj.blockSignals(True)
+            self.cmb_timeline_prj.clear()
         self.cmb_export_prj.clear()
         self.cmb_export_prj.addItem("All Projects", None)
 
@@ -374,6 +372,16 @@ class AdminWorkspace(QMainWindow):
                     self.cmb_timeline_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
             self.cmb_export_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
 
+        idx = self.cmb_task_prj.findData(prev_task_prj)
+        self.cmb_task_prj.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_task_prj.blockSignals(False)
+        if hasattr(self, "cmb_timeline_prj"):
+            idx = self.cmb_timeline_prj.findData(prev_timeline_prj)
+            self.cmb_timeline_prj.setCurrentIndex(idx if idx >= 0 else 0)
+            self.cmb_timeline_prj.blockSignals(False)
+        self.update_tasks_views()
+        self.on_timeline_project_selected()
+
     def on_add_project(self):
         pid = self.txt_prj_id.text().strip()
         pname = self.txt_prj_name.text().strip()
@@ -381,14 +389,16 @@ class AdminWorkspace(QMainWindow):
         if not pid or not pname:
             QMessageBox.warning(self, "Error", "Project ID and Name are required.")
             return
-        self.net_client.send_action("ADD_PROJECT", {"project_id": pid, "name": pname, "description": pdesc})
-        self.txt_prj_id.clear()
-        self.txt_prj_name.clear()
-        self.txt_prj_desc.clear()
-        self.toast.show_message(f"Project '{pname}' added.")
+        def added(_reply):
+            self.txt_prj_id.clear()
+            self.txt_prj_name.clear()
+            self.txt_prj_desc.clear()
+        self.mutate("ADD_PROJECT", {"project_id": pid, "name": pname, "description": pdesc},
+                    f"Project '{pname}' added.", added, "Could Not Add Project")
 
     def on_toggle_hide_project(self, project_id: str, current_hidden: int):
-        self.net_client.send_action("TOGGLE_HIDE_PROJECT", {"project_id": project_id, "current_hidden": current_hidden})
+        self.mutate("TOGGLE_HIDE_PROJECT", {"project_id": project_id, "current_hidden": current_hidden},
+                    "Project visibility updated.")
 
     # ------------------- TAB 3: TASKS & DISCIPLINES TAB (A1, A2) -------------------
     def create_task_tab(self) -> QWidget:
@@ -538,18 +548,15 @@ class AdminWorkspace(QMainWindow):
             self._target_disc_after_add = disc_id
             self._last_selected_disc = disc_id
 
-            self.net_client.send_action("ADD_TASK", {
+            self.mutate("ADD_TASK", {
                 "project_id": p_id,
-                "task_id": None,
                 "name": t_name,
                 "discipline_id": disc_id,
                 "assigned_head_id": head_id,
                 "planned_start_date": dt_start.date().toString("yyyy-MM-dd"),
                 "planned_end_date": dt_end.date().toString("yyyy-MM-dd")
-            })
-            self.toast.show_message(f"Creating task '{t_name}' under {disc_id}...")
-            # Proactively reload tasks
-            self.net_client.send_action("GET_TASKS", {"include_hidden": True})
+            }, None, lambda r: self.toast.show_message(
+                f"Task '{r['task']['name']}' ({r['task']['task_id']}) added."), "Could Not Add Task")
 
     def update_disciplines_views(self):
         # Update user creation discipline combobox
@@ -750,15 +757,17 @@ class AdminWorkspace(QMainWindow):
                 QMessageBox.warning(self, "Error", "Task Name and Discipline cannot be empty.")
                 return
 
-            self.net_client.send_action("UPDATE_TASK", {
+            if dt_start.date() > dt_end.date():
+                QMessageBox.warning(self, "Error", "Planned start date cannot be after end date.")
+                return
+            self.mutate("UPDATE_TASK", {
                 "task_id": task["task_id"],
                 "name": new_name,
                 "discipline_id": new_disc,
                 "assigned_head_id": new_head,
                 "planned_start_date": dt_start.date().toString("yyyy-MM-dd"),
                 "planned_end_date": dt_end.date().toString("yyyy-MM-dd")
-            })
-            self.toast.show_message(f"Task '{task['task_id']}' updated successfully.")
+            }, f"Task '{task['task_id']}' updated.", error_title="Could Not Update Task")
 
     def on_admin_edit_task_dates(self, task_id: str, old_start: str, old_end: str):
         self.on_admin_edit_task_details({"task_id": task_id, "planned_start_date": old_start, "planned_end_date": old_end})
@@ -795,13 +804,15 @@ class AdminWorkspace(QMainWindow):
         if not hasattr(self, "cmb_timeline_prj"):
             return
         p_id = self.cmb_timeline_prj.currentData()
-        if p_id:
-            self.net_client.send_action("GET_PROJECT_TIMELINE", {"project_id": p_id})
+        if p_id and self.net_client.is_connected:
+            self.net_client.call("GET_PROJECT_TIMELINE", {"project_id": p_id},
+                                 lambda r: self.timeline_widget.load_timeline_data(r.get("data", {})),
+                                 self.on_request_error)
         elif hasattr(self, "timeline_widget"):
             self.timeline_widget.load_timeline_data({})
 
     def on_toggle_hide_task(self, task_id: str, current_hidden: int):
-        self.net_client.send_action("TOGGLE_HIDE_TASK", {"task_id": task_id, "current_hidden": current_hidden})
+        self.mutate("TOGGLE_HIDE_TASK", {"task_id": task_id, "current_hidden": current_hidden}, "Task visibility updated.")
 
     def on_discipline_tab_changed(self, idx: int):
         if idx >= 0 and hasattr(self, "tabs_disciplines"):
@@ -856,21 +867,14 @@ class AdminWorkspace(QMainWindow):
             self.tbl_pending_proposals.setCellWidget(r_idx, 6, create_table_action_cell([btn_app, btn_rej]))
 
     def on_approve_proposal(self, proposal_id: str):
-        self.net_client.send_action("APPROVE_TASK_PROPOSAL", {
-            "proposal_id": proposal_id,
-            "admin_id": self.user["user_id"]
-        })
-        self.toast.show_message("Proposal approved.")
+        self.mutate("APPROVE_TASK_PROPOSAL", {"proposal_id": proposal_id},
+                    "Proposal approved and task created.", error_title="Could Not Approve")
 
     def on_reject_proposal(self, proposal_id: str):
         reason, ok = QInputDialog.getText(self, "Reject Task Proposal", "Enter mandatory rejection reason:")
         if ok and reason.strip():
-            self.net_client.send_action("REJECT_TASK_PROPOSAL", {
-                "proposal_id": proposal_id,
-                "admin_id": self.user["user_id"],
-                "reason": reason.strip()
-            })
-            self.toast.show_message("Proposal rejected.")
+            self.mutate("REJECT_TASK_PROPOSAL", {"proposal_id": proposal_id, "reason": reason.strip()},
+                        "Proposal rejected.", lambda r: self.reload_all_data(), "Could Not Reject")
         elif ok:
             QMessageBox.warning(self, "Error", "A rejection reason is mandatory.")
 
@@ -921,21 +925,14 @@ class AdminWorkspace(QMainWindow):
             self.tbl_pending_date_changes.setCellWidget(r_idx, 6, create_table_action_cell([btn_app, btn_rej]))
 
     def on_approve_date_change(self, request_id: str):
-        self.net_client.send_action("APPROVE_DATE_CHANGE", {
-            "request_id": request_id,
-            "admin_id": self.user["user_id"]
-        })
-        self.toast.show_message("Date change approved and task schedule updated.")
+        self.mutate("APPROVE_DATE_CHANGE", {"request_id": request_id},
+                    "Date change approved and task schedule updated.", error_title="Could Not Approve")
 
     def on_reject_date_change(self, request_id: str):
         reason, ok = QInputDialog.getText(self, "Reject Date Change", "Enter mandatory rejection reason:")
         if ok and reason.strip():
-            self.net_client.send_action("REJECT_DATE_CHANGE", {
-                "request_id": request_id,
-                "admin_id": self.user["user_id"],
-                "reason": reason.strip()
-            })
-            self.toast.show_message("Date change request rejected.")
+            self.mutate("REJECT_DATE_CHANGE", {"request_id": request_id, "reason": reason.strip()},
+                        "Date change request rejected.", lambda r: self.reload_all_data(), "Could Not Reject")
         elif ok:
             QMessageBox.warning(self, "Error", "A rejection reason is mandatory.")
 
@@ -1007,13 +1004,15 @@ class AdminWorkspace(QMainWindow):
         if not did or not dname:
             QMessageBox.warning(self, "Error", "Discipline ID and Name are required.")
             return
-        self.net_client.send_action("ADD_DISCIPLINE", {"discipline_id": did, "name": dname})
-        self.txt_disc_id.clear()
-        self.txt_disc_name.clear()
-        self.toast.show_message(f"Discipline '{dname}' added.")
+        def added(_reply):
+            self.txt_disc_id.clear()
+            self.txt_disc_name.clear()
+        self.mutate("ADD_DISCIPLINE", {"discipline_id": did, "name": dname},
+                    f"Discipline '{dname}' added.", added, "Could Not Add Discipline")
 
     def on_toggle_hide_discipline(self, disc_id: str, current_hidden: int):
-        self.net_client.send_action("TOGGLE_HIDE_DISCIPLINE", {"discipline_id": disc_id, "current_hidden": current_hidden})
+        self.mutate("TOGGLE_HIDE_DISCIPLINE", {"discipline_id": disc_id, "current_hidden": current_hidden},
+                    "Discipline visibility updated.")
 
     # ------------------- TAB 4: ANALYSIS TAB -------------------
     def create_analysis_tab(self) -> QWidget:
@@ -1146,10 +1145,10 @@ class AdminWorkspace(QMainWindow):
 
         c_layout.addLayout(filters_grid)
 
-        btn_export = QPushButton("Export Categorized Excel Report")
-        btn_export.setMinimumHeight(44)
-        btn_export.clicked.connect(self.on_request_excel_export)
-        c_layout.addWidget(btn_export)
+        self.btn_export = QPushButton("Export Categorized Excel Report")
+        self.btn_export.setMinimumHeight(44)
+        self.btn_export.clicked.connect(self.on_request_excel_export)
+        c_layout.addWidget(self.btn_export)
 
         c_layout.addStretch()
         layout.addWidget(card)
@@ -1165,40 +1164,33 @@ class AdminWorkspace(QMainWindow):
                     self.cmb_export_head.addItem(f"{u.get('full_name') or u['user_id']} ({u['user_id']})", u["user_id"])
 
     def on_request_excel_export(self):
-        p_id = self.cmb_export_prj.currentData()
-        d_id = self.cmb_export_disc.currentData()
-        h_id = self.cmb_export_head.currentData()
+        filters = {
+            "project_id": self.cmb_export_prj.currentData(),
+            "discipline_id": self.cmb_export_disc.currentData(),
+            "employee_id": self.cmb_export_head.currentData(),
+        }
+        self.btn_export.setEnabled(False)
+        self.toast.show_message("Generating the Excel report on the Central Server...", duration_ms=10000)
+        run_async(self.net_client.export_excel(filters), self._on_export_ready, self._on_export_failed)
 
-        self.net_client.send_action("EXPORT_EXCEL_REQUEST", {
-            "project_id": p_id,
-            "discipline_id": d_id,
-            "employee_id": h_id
-        })
-        self.toast.show_message("Export request sent to Central Server...")
+    def _on_export_failed(self, exc):
+        self.btn_export.setEnabled(True)
+        QMessageBox.critical(self, "Export Error", describe_error(exc))
 
-    def handle_export_response(self, data: dict):
-        if not data.get("success"):
-            QMessageBox.critical(self, "Export Error", data.get("error", "Server export failed."))
-            return
-
-        b64 = data.get("data_b64")
-        if not b64:
-            return
-
-        raw_bytes = base64.b64decode(b64)
-        default_name = data.get("filename") or "Progress_Logs_Report.xlsx"
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Excel Report", default_name, "Excel Files (*.xlsx)")
-        if file_path:
-            with open(file_path, "wb") as f:
-                f.write(raw_bytes)
-            QMessageBox.information(self, "Success", f"Excel report saved successfully to:\n{file_path}")
+    def _on_export_ready(self, result):
+        self.btn_export.setEnabled(True)
+        raw_bytes, default_name = result
+        save_excel_report(self, raw_bytes, default_name)
 
     def on_task_proposal_event(self, data: dict):
-        self.toast.show_message("Task Proposal Event received.")
+        prop = data.get("proposal", {})
+        if data.get("type") == "NEW_TASK_PROPOSAL_EVENT":
+            self.toast.show_message(f"New task request from {prop.get('proposed_by_id')}: '{prop.get('task_name')}'.")
         self.reload_all_data()
 
     def on_task_date_change_event(self, data: dict):
-        self.toast.show_message("Task Schedule Change Event received.")
+        if data.get("event") == "CREATED":
+            self.toast.show_message(f"New date change request for task {data.get('request', {}).get('task_id')}.")
         self.reload_all_data()
 
     def on_logout(self):
@@ -1215,7 +1207,7 @@ class AdminWorkspace(QMainWindow):
         w = max(self.width(), 1050)
         sidebar_w = int(w * 0.382)
         content_w = int(w * 0.618)
-        settings = QSettings("SprintsDeskApp", "AdminWorkspace")
+        settings = app_settings("AdminWorkspace")
         emp_sizes = settings.value("emp_splitter_sizes")
         if emp_sizes and hasattr(self, "emp_splitter"):
             try:
@@ -1235,10 +1227,23 @@ class AdminWorkspace(QMainWindow):
             self.prj_splitter.setSizes([sidebar_w, content_w])
 
     def closeEvent(self, event):
-        settings = QSettings("SprintsDeskApp", "AdminWorkspace")
+        settings = app_settings("AdminWorkspace")
         if hasattr(self, "emp_splitter"):
             settings.setValue("emp_splitter_sizes", self.emp_splitter.sizes())
         if hasattr(self, "prj_splitter"):
             settings.setValue("prj_splitter_sizes", self.prj_splitter.sizes())
         super().closeEvent(event)
 
+
+def save_excel_report(parent, raw_bytes: bytes, default_name: str):
+    """Ask where to save a server-generated workbook and write it."""
+    file_path, _ = QFileDialog.getSaveFileName(parent, "Save Excel Report", default_name, "Excel Files (*.xlsx)")
+    if not file_path:
+        return
+    try:
+        with open(file_path, "wb") as f:
+            f.write(raw_bytes)
+    except OSError as e:
+        QMessageBox.critical(parent, "Save Failed", f"Could not save the report:\n{e}")
+        return
+    QMessageBox.information(parent, "Success", f"Excel report saved to:\n{file_path}")

@@ -1,22 +1,22 @@
-import base64
-from PySide6.QtCore import Qt, QSettings
+import uuid
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QFrame, QComboBox, QTableWidget, 
     QTableWidgetItem, QHeaderView, QMessageBox, QFileDialog, QSplitter
 )
-from app.network.client import NetworkClient
+from app.core.settings import app_settings
+from app.network.client import NetworkClient, run_async
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_item
+    setup_modern_table, create_table_item, describe_error
 )
 
 class CooWorkspace(QMainWindow):
     """COO Live Monitoring & Priority Dispatch Workspace with Resizable Splitters (A5, A6, B2)."""
-    def __init__(self, user_dict: dict, db_manager, net_client: NetworkClient):
+    def __init__(self, user_dict: dict, net_client: NetworkClient):
         super().__init__()
         self.user = user_dict
-        self.db = db_manager
         self.net_client = net_client
         self.logout_requested = False
 
@@ -38,9 +38,9 @@ class CooWorkspace(QMainWindow):
         top_bar.addWidget(header)
         top_bar.addStretch()
 
-        btn_export = QPushButton("Export Categorized Report", self)
-        btn_export.clicked.connect(self.on_export_excel)
-        top_bar.addWidget(btn_export)
+        self.btn_export = QPushButton("Export Categorized Report", self)
+        self.btn_export.clicked.connect(self.on_export_excel)
+        top_bar.addWidget(self.btn_export)
 
         btn_logout = QPushButton("Logout", self)
         btn_logout.setObjectName("DangerButton")
@@ -136,25 +136,32 @@ class CooWorkspace(QMainWindow):
         self.net_client.log_event_received.connect(self.on_live_log_event)
         self.net_client.notification_response_received.connect(self.on_live_notif_response)
         self.net_client.global_refresh_received.connect(self.reload_all_data)
-        self.net_client.response_received.connect(self.on_server_response)
+        self.net_client.connection_status_changed.connect(lambda ok, _msg: ok and self.reload_all_data())
 
         self.reload_all_data()
 
     def reload_all_data(self):
-        self.net_client.send_action("GET_USERS", {"role": "HEAD"})
-        self.net_client.send_action("GET_RECENT_LOGS", {})
+        if not self.net_client.is_connected:
+            return
+        self.net_client.call("GET_USERS", {"role": "HEAD"}, self._on_users, self.on_request_error)
+        self.net_client.call("GET_RECENT_LOGS", {"limit": 200},
+                             lambda r: self.populate_logs_table(r.get("logs", [])), self.on_request_error)
+        self.net_client.call("GET_NOTIFICATIONS", {"limit": 200},
+                             lambda r: self.populate_responses_table(r.get("notifications", [])), self.on_request_error)
 
-    def on_server_response(self, resp_type: str, data: dict):
-        if resp_type == "USERS_RESPONSE":
-            self.users_data = data.get("users", [])
-            self.cmb_target_emp.clear()
-            for u in self.users_data:
-                d_str = f" [{u.get('discipline_id')}]" if u.get("discipline_id") else ""
-                self.cmb_target_emp.addItem(f"{u.get('full_name') or u['user_id']} ({u['user_id']}){d_str}", u["user_id"])
-        elif resp_type == "RECENT_LOGS_RESPONSE":
-            self.populate_logs_table(data.get("logs", []))
-        elif resp_type == "EXPORT_EXCEL_RESPONSE":
-            self.handle_export_response(data)
+    def on_request_error(self, exc):
+        self.toast.show_message(describe_error(exc), is_error=True)
+
+    def _on_users(self, r):
+        self.users_data = r.get("users", [])
+        current = self.cmb_target_emp.currentData()
+        self.cmb_target_emp.clear()
+        for u in self.users_data:
+            d_str = f" [{u.get('discipline_id')}]" if u.get("discipline_id") else ""
+            self.cmb_target_emp.addItem(f"{u.get('full_name') or u['user_id']} ({u['user_id']}){d_str}", u["user_id"])
+        idx = self.cmb_target_emp.findData(current)
+        if idx >= 0:
+            self.cmb_target_emp.setCurrentIndex(idx)
 
     def populate_logs_table(self, logs: list):
         self.tbl_logs.setRowCount(0)
@@ -178,7 +185,7 @@ class CooWorkspace(QMainWindow):
             ctx_item.setForeground(Qt.yellow)
         self.tbl_logs.setItem(r_idx, 6, ctx_item)
 
-        self.tbl_logs.setItem(r_idx, 7, create_table_item(f"{l['start_date']} ➔ {l['end_date']}", Qt.AlignCenter))
+        self.tbl_logs.setItem(r_idx, 7, create_table_item(f"{l['start_date']} to {l['end_date']}", Qt.AlignCenter))
         self.tbl_logs.setItem(r_idx, 8, create_table_item(l.get("progress_stage") or "", Qt.AlignCenter))
         self.tbl_logs.setItem(r_idx, 9, create_table_item(l.get("notes") or "", Qt.AlignLeft | Qt.AlignVCenter))
 
@@ -187,22 +194,37 @@ class CooWorkspace(QMainWindow):
         self.insert_log_row(0, log)
         self.toast.show_message(f"Live log submitted by {log.get('employee_id')}.")
 
+    def populate_responses_table(self, notifications: list):
+        self.tbl_responses.setRowCount(0)
+        for n in notifications:
+            self._upsert_response_row(n)
+
+    def _upsert_response_row(self, notif: dict):
+        """Insert or update the tracker row for one alert (keyed by notification ID)."""
+        n_id = notif.get("notification_id", "")
+        row = next((r for r in range(self.tbl_responses.rowCount())
+                    if self.tbl_responses.item(r, 0) and self.tbl_responses.item(r, 0).text() == n_id), None)
+        if row is None:
+            row = self.tbl_responses.rowCount()
+            self.tbl_responses.insertRow(row)
+            self.tbl_responses.setItem(row, 0, create_table_item(n_id, Qt.AlignCenter))
+        emp = notif.get("target_employee_id") or ""
+        name = notif.get("target_name")
+        if notif.get("message") is not None:
+            self.tbl_responses.setItem(row, 2, create_table_item(notif.get("message", ""), Qt.AlignLeft | Qt.AlignVCenter))
+        self.tbl_responses.setItem(row, 1, create_table_item(f"{name} ({emp})" if name else emp, Qt.AlignLeft | Qt.AlignVCenter))
+        st = notif.get("status") or "PENDING"
+        st_item = create_table_item(st, Qt.AlignCenter)
+        st_item.setForeground(Qt.green if st == "ACCEPTED" else (Qt.red if st == "DENIED" else Qt.yellow))
+        self.tbl_responses.setItem(row, 3, st_item)
+        self.tbl_responses.setItem(row, 4, create_table_item(notif.get("responded_at") or "", Qt.AlignCenter))
+
     def on_live_notif_response(self, data: dict):
         notif = data.get("notification", {})
         st = notif.get("status")
         emp = notif.get("target_employee_id")
-        self.toast.show_message(f"Employee '{emp}' responded: {st}", is_warning=(st == "DENIED"))
-
-        # Add to table
-        row = self.tbl_responses.rowCount()
-        self.tbl_responses.insertRow(row)
-        self.tbl_responses.setItem(row, 0, create_table_item(notif.get("notification_id", ""), Qt.AlignCenter))
-        self.tbl_responses.setItem(row, 1, create_table_item(emp or "", Qt.AlignLeft | Qt.AlignVCenter))
-        self.tbl_responses.setItem(row, 2, create_table_item(notif.get("message", ""), Qt.AlignLeft | Qt.AlignVCenter))
-        st_item = create_table_item(st or "", Qt.AlignCenter)
-        st_item.setForeground(Qt.green if st == "ACCEPTED" else Qt.red)
-        self.tbl_responses.setItem(row, 3, st_item)
-        self.tbl_responses.setItem(row, 4, create_table_item(notif.get("responded_at", ""), Qt.AlignCenter))
+        self.toast.show_message(f"Head '{emp}' responded: {st}", is_warning=(st == "DENIED"))
+        self._upsert_response_row(notif)
 
     def on_send_priority_alert(self):
         target_emp = self.cmb_target_emp.currentData()
@@ -211,31 +233,35 @@ class CooWorkspace(QMainWindow):
             QMessageBox.warning(self, "Error", "Target employee and message are required.")
             return
 
-        self.net_client.send_action("COO_NOTIFY", {
-            "coo_id": self.user["user_id"],
+        def sent(reply):
+            self.txt_message.clear()
+            self._upsert_response_row(reply.get("notification", {}))
+            if reply.get("delivered"):
+                self.toast.show_message(f"Priority alert delivered to '{target_emp}'.")
+            else:
+                self.toast.show_message(f"'{target_emp}' is not online right now; the alert will appear when they log in.",
+                                        is_warning=True, duration_ms=6000)
+
+        self.net_client.call("COO_NOTIFY", {
+            "notification_id": f"NOTIF-{uuid.uuid4().hex.upper()}",
             "target_employee_id": target_emp,
             "message": msg
-        })
-        self.txt_message.clear()
-        self.toast.show_message(f"Priority alert dispatched to '{target_emp}'.")
+        }, sent, lambda e: QMessageBox.critical(self, "Alert Not Sent", describe_error(e)))
 
     def on_export_excel(self):
-        self.net_client.send_action("EXPORT_EXCEL_REQUEST", {})
-        self.toast.show_message("Generating comprehensive Excel report on Central Server...")
+        self.btn_export.setEnabled(False)
+        self.toast.show_message("Generating the Excel report on the Central Server...", duration_ms=10000)
+        run_async(self.net_client.export_excel({}), self._on_export_ready, self._on_export_failed)
 
-    def handle_export_response(self, data: dict):
-        if not data.get("success"):
-            QMessageBox.critical(self, "Export Error", data.get("error", "Failed to generate report."))
-            return
-        b64 = data.get("data_b64")
-        if not b64:
-            return
-        raw = base64.b64decode(b64)
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save COO Report", "COO_Full_Progress_Report.xlsx", "Excel Files (*.xlsx)")
-        if file_path:
-            with open(file_path, "wb") as f:
-                f.write(raw)
-            QMessageBox.information(self, "Success", f"Report saved successfully to:\n{file_path}")
+    def _on_export_failed(self, exc):
+        self.btn_export.setEnabled(True)
+        QMessageBox.critical(self, "Export Error", describe_error(exc))
+
+    def _on_export_ready(self, result):
+        from app.ui.admin_workspace import save_excel_report
+        self.btn_export.setEnabled(True)
+        raw_bytes, default_name = result
+        save_excel_report(self, raw_bytes, default_name)
 
     def on_logout(self):
         confirm = QMessageBox.question(
@@ -251,7 +277,7 @@ class CooWorkspace(QMainWindow):
         h = max(self.height(), 750)
         top_h = int(h * 0.618)
         bottom_h = int(h * 0.382)
-        settings = QSettings("SprintsDeskApp", "CooWorkspace")
+        settings = app_settings("CooWorkspace")
         saved_sizes = settings.value("coo_main_splitter")
         if saved_sizes and hasattr(self, "main_splitter"):
             try:
@@ -262,7 +288,7 @@ class CooWorkspace(QMainWindow):
             self.main_splitter.setSizes([top_h, bottom_h])
 
     def closeEvent(self, event):
-        settings = QSettings("SprintsDeskApp", "CooWorkspace")
+        settings = app_settings("CooWorkspace")
         if hasattr(self, "main_splitter"):
             settings.setValue("coo_main_splitter", self.main_splitter.sizes())
         super().closeEvent(event)

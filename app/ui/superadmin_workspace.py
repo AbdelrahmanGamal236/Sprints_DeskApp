@@ -10,15 +10,14 @@ from app.ui.admin_workspace import AdminWorkspace
 from app.ui.coo_workspace import CooWorkspace
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_action_cell, create_table_item
+    setup_modern_table, create_table_action_cell, create_table_item, describe_error
 )
 
 class SuperAdminWorkspace(QMainWindow):
     """Super Admin Master Management Workspace (B5 Server Permissions)."""
-    def __init__(self, user_dict: dict, db_manager, net_client: NetworkClient):
+    def __init__(self, user_dict: dict, net_client: NetworkClient):
         super().__init__()
         self.user = user_dict
-        self.db = db_manager
         self.net_client = net_client
         self.logout_requested = False
 
@@ -55,18 +54,18 @@ class SuperAdminWorkspace(QMainWindow):
         tabs.addTab(self.create_accounts_tab(), "Master Accounts & Roles")
 
         # Tab 2: Admin Tools
-        self.admin_sub = AdminWorkspace(self.user, self.db, self.net_client)
+        self.admin_sub = AdminWorkspace(self.user, self.net_client)
         tabs.addTab(self.admin_sub.centralWidget(), "Admin Operations")
 
         # Tab 3: COO Oversight Tools
-        self.coo_sub = CooWorkspace(self.user, self.db, self.net_client)
+        self.coo_sub = CooWorkspace(self.user, self.net_client)
         tabs.addTab(self.coo_sub.centralWidget(), "COO Executive Oversight")
 
         main_layout.addWidget(tabs)
         main_layout.addWidget(CopyrightFooter(self))
 
-        self.net_client.response_received.connect(self.on_server_response)
         self.net_client.global_refresh_received.connect(self.reload_accounts)
+        self.net_client.connection_status_changed.connect(lambda ok, _msg: ok and self.reload_accounts())
 
         self.reload_accounts()
 
@@ -144,29 +143,23 @@ class SuperAdminWorkspace(QMainWindow):
         self.cmb_disc.setVisible(is_head)
 
     def reload_accounts(self):
-        self.net_client.send_action("GET_USERS", {})
-        self.net_client.send_action("GET_DISCIPLINES", {"include_hidden": True})
+        if not self.net_client.is_connected:
+            return
+        self.net_client.call("GET_USERS", {}, self._on_users,
+                             lambda e: self.toast.show_message(describe_error(e), is_error=True))
+        self.net_client.call("GET_DISCIPLINES", {"include_hidden": True}, self._on_disciplines,
+                             lambda e: self.toast.show_message(describe_error(e), is_error=True))
 
-    def on_server_response(self, resp_type: str, data: dict):
-        if resp_type == "USERS_RESPONSE":
-            self.users_data = data.get("users", [])
-            self.populate_users_table()
-        elif resp_type == "DISCIPLINES_RESPONSE":
-            self.disciplines_data = data.get("disciplines", [])
-            self.cmb_disc.clear()
-            for d in self.disciplines_data:
-                if not d.get("is_hidden"):
-                    self.cmb_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
-        elif resp_type == "CREATE_USER_RESPONSE":
-            if data.get("success"):
-                self.toast.show_message("Account created successfully.")
-                self.reload_accounts()
-            else:
-                QMessageBox.critical(self, "Error", data.get("error", "Failed to create user."))
-        elif resp_type == "RESET_PASSWORD_RESPONSE":
-            if data.get("success"):
-                self.toast.show_message("Password reset successfully.")
-                self.reload_accounts()
+    def _on_users(self, r):
+        self.users_data = r.get("users", [])
+        self.populate_users_table()
+
+    def _on_disciplines(self, r):
+        self.disciplines_data = r.get("disciplines", [])
+        self.cmb_disc.clear()
+        for d in self.disciplines_data:
+            if not d.get("is_hidden"):
+                self.cmb_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
 
     def populate_users_table(self):
         self.tbl_users.setRowCount(0)
@@ -194,14 +187,14 @@ class SuperAdminWorkspace(QMainWindow):
             QMessageBox.warning(self, "Error", "User ID and Full Name are required.")
             return
 
-        self.net_client.send_action("CREATE_USER", {
-            "user_id": uid,
-            "full_name": fname,
-            "role": role,
-            "discipline_id": disc
-        })
-        self.txt_user_id.clear()
-        self.txt_full_name.clear()
+        def created(_reply):
+            self.txt_user_id.clear()
+            self.txt_full_name.clear()
+            self.toast.show_message(f"{role} account '{uid}' created. Initial password is the User ID.")
+            self.reload_accounts()
+
+        self.net_client.call("CREATE_USER", {"user_id": uid, "full_name": fname, "role": role, "discipline_id": disc},
+                             created, lambda e: QMessageBox.critical(self, "Could Not Create Account", describe_error(e)))
 
     def on_reset_pass(self, user_id: str):
         confirm = QMessageBox.question(
@@ -209,7 +202,11 @@ class SuperAdminWorkspace(QMainWindow):
             QMessageBox.Yes | QMessageBox.No
         )
         if confirm == QMessageBox.Yes:
-            self.net_client.send_action("RESET_PASSWORD", {"user_id": user_id})
+            def done(_reply):
+                self.toast.show_message(f"Password for '{user_id}' reset to the User ID (must be changed at next login).")
+                self.reload_accounts()
+            self.net_client.call("RESET_PASSWORD", {"user_id": user_id}, done,
+                                 lambda e: QMessageBox.critical(self, "Could Not Reset Password", describe_error(e)))
 
     def on_logout(self):
         confirm = QMessageBox.question(

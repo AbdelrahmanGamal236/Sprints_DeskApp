@@ -1,136 +1,193 @@
 import sys
+import os
 import argparse
 import asyncio
 import logging
 import socket
-from PySide6.QtWidgets import QApplication
-from qasync import QEventLoop
 
-from app.core.config import DEFAULT_WS_PORT, ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN
-from app.database.db_manager import DBManager
-from app.network.server import CentralWebSocketServer
-from app.network.client import NetworkClient
-from app.services.sync_service import SyncService
-from app.ui.styles import DARK_THEME_QSS
-from app.ui.login_dialog import LoginDialog
-from app.ui.head_workspace import HeadWorkspace
-from app.ui.admin_workspace import AdminWorkspace
-from app.ui.coo_workspace import CooWorkspace
-from app.ui.superadmin_workspace import SuperAdminWorkspace
+DEFAULT_WS_PORT = 8765  # duplicated from app.core.config so arguments can be parsed before app modules load
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Offline Progress Logging & Task Management System")
+    parser.add_argument("--server-only", action="store_true", help="Run dedicated Central Server headless daemon mode")
+    parser.add_argument("--standalone", action="store_true",
+                        help="Demo: embedded server + client in one process, using a separate data_demo folder")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host address for Central Server")
+    parser.add_argument("--port", type=int, default=DEFAULT_WS_PORT, help="Port for Central Server")
+    parser.add_argument("--server-ip", type=str, default="127.0.0.1", help="Central Server LAN IP")
+    return parser.parse_args()
+
 
 def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex((host, port)) == 0
 
-async def run_server_task(host: str = "0.0.0.0", port: int = DEFAULT_WS_PORT, standalone: bool = False):
-    server = CentralWebSocketServer(host=host, port=port, standalone=standalone)
-    await server.start()
 
-async def async_main(app, args):
-    # Only start embedded server if explicitly requested via --standalone (B3)
-    if getattr(args, "standalone", False):
-        if not is_port_in_use(args.port, "127.0.0.1"):
-            logging.info("Starting standalone embedded Central Server task on port %d...", args.port)
-            asyncio.create_task(run_server_task("0.0.0.0", args.port, standalone=True))
-            await asyncio.sleep(0.2)
+def announce_bootstrap_credentials(server):
+    """Print one-time passwords for the Super Admin bootstrap (shown only on the first start)."""
+    creds = getattr(server.db, "bootstrap_credentials", [])
+    if not creds:
+        return
+    from app.core.config import DATA_DIR
+    lines = ["", "=" * 70, " ONE-TIME LOGIN CREDENTIALS (write these down now)", "=" * 70]
+    for uid, pwd in creds:
+        lines.append(f"   User ID: {uid:<12}  Temporary password: {pwd}")
+    lines += ["", " These accounts must choose a new password at first login.",
+              f" A copy was saved to: {DATA_DIR / 'FIRST_RUN_CREDENTIALS.txt'}",
+              " Delete that file after you have logged in.", "=" * 70, ""]
+    text = "\n".join(lines)
+    print(text, flush=True)
+    try:
+        with open(DATA_DIR / "FIRST_RUN_CREDENTIALS.txt", "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    except OSError as e:
+        logging.error("Could not write FIRST_RUN_CREDENTIALS.txt: %s", e)
 
-    while True:
-        # Open Login Dialog (Server-side auth - B1)
-        login_dialog = LoginDialog(default_server_ip=args.server_ip, port=args.port)
-        if login_dialog.exec() != LoginDialog.Accepted:
-            break
 
-        user = login_dialog.authenticated_user
-        user_id = user["user_id"]
-        role = user["role"]
-        server_ip = login_dialog.selected_server_ip
+def run_server_only(args):
+    from app.network.server import CentralWebSocketServer
+    logging.info("Starting Central Server Headless Daemon on port %d...", args.port)
+    if is_port_in_use(args.port, "127.0.0.1"):
+        logging.error("Port %d is already in use by another process (is the server already running?).", args.port)
+        sys.exit(1)
 
-        # Initialize Network Client & Sync Service
-        net_client = NetworkClient(user_id=user_id, role=role, server_ip=server_ip, port=args.port)
-        sync_service = SyncService(net_client)
-
-        # Start network client background loop in qasync
-        net_task = asyncio.create_task(net_client.start())
-
-        # Open workspace based on role (B2: client passes None or dummy for direct DB)
-        if role == ROLE_HEAD:
-            workspace = HeadWorkspace(user, None, net_client, sync_service)
-        elif role == ROLE_ADMIN:
-            workspace = AdminWorkspace(user, None, net_client)
-        elif role == ROLE_COO:
-            workspace = CooWorkspace(user, None, net_client)
-        elif role == ROLE_SUPER_ADMIN:
-            workspace = SuperAdminWorkspace(user, None, net_client)
-        else:
-            logging.error(f"Unknown role '{role}'")
-            break
-
-        closed_event = asyncio.Event()
-        orig_close_event = workspace.closeEvent
-
-        def custom_close_event(event):
-            if orig_close_event:
-                orig_close_event(event)
-            closed_event.set()
-
-        workspace.closeEvent = custom_close_event
-        workspace.show()
-
-        # Cleanly wait for workspace window to close without interrupting event loop
-        await closed_event.wait()
-
-        net_task.cancel()
-        try:
-            await net_task
-        except asyncio.CancelledError:
-            pass
-
-        # If user did NOT click Logout (e.g. closed window), exit app
-        if not getattr(workspace, "logout_requested", False):
-            break
-
-def main():
-    parser = argparse.ArgumentParser(description="Offline Progress Logging & Task Management System")
-    parser.add_argument("--server-only", action="store_true", help="Run dedicated Central Server headless daemon mode")
-    parser.add_argument("--standalone", action="store_true", help="Run embedded server + client in one process for single-PC testing")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host address for Central Server")
-    parser.add_argument("--port", type=int, default=DEFAULT_WS_PORT, help="Port for Central Server")
-    parser.add_argument("--server-ip", type=str, default="127.0.0.1", help="Central Server LAN IP")
-    args = parser.parse_args()
-
-    if args.server_only:
-        logging.info("Starting Central Server Headless Daemon on port %d...", args.port)
-        if is_port_in_use(args.port, "127.0.0.1"):
-            logging.error(f"Port {args.port} is already in use!")
-            print(f"\n[ERROR] Port {args.port} is already in use by another running process (or another DeskApp instance).")
-            print("Please close any running DeskApp instances before starting the server daemon.\n")
-            input("Press Enter to exit...")
-            sys.exit(1)
-        try:
-            asyncio.run(run_server_task(args.host, args.port, standalone=False))
-        except KeyboardInterrupt:
-            logging.info("Central Server stopped.")
-        except OSError as e:
-            logging.error(f"Failed to start Central Server: {e}")
-            print(f"\n[ERROR] Could not start server: {e}\n")
-            input("Press Enter to exit...")
-            sys.exit(1)
-        sys.exit(0)
-
-    # Launch Desktop Application GUI
-    app = QApplication(sys.argv)
-    app.setStyleSheet(DARK_THEME_QSS)
-
-    event_loop = QEventLoop(app)
-    asyncio.set_event_loop(event_loop)
+    async def serve():
+        server = CentralWebSocketServer(host=args.host, port=args.port, standalone=False)
+        announce_bootstrap_credentials(server)
+        await server.start()
 
     try:
-        with event_loop:
-            event_loop.run_until_complete(async_main(app, args))
-    except (RuntimeError, SystemExit, KeyboardInterrupt):
-        pass
+        asyncio.run(serve())
+    except KeyboardInterrupt:
+        logging.info("Central Server stopped.")
+    except OSError as e:
+        logging.error("Could not start Central Server: %s", e)
+        sys.exit(1)
+
+
+class AppController:
+    """Drives the GUI: login window -> role workspace -> back to login on logout / expired session."""
+    def __init__(self, app, args):
+        self.app = app
+        self.args = args
+        # The controller decides when to exit; windows close and reopen while switching login <-> workspace
+        app.setQuitOnLastWindowClosed(False)
+        self.login_dialog = None
+        self.workspace = None
+        self.net_client = None
+        self.sync_service = None
+
+    def show_login(self, notice: str = ""):
+        from app.ui.login_dialog import LoginDialog
+        self.login_dialog = LoginDialog(default_server_ip=self.args.server_ip, port=self.args.port, notice=notice)
+        self.login_dialog.logged_in.connect(self.open_workspace)
+        self.login_dialog.rejected.connect(self.quit)
+        self.login_dialog.show()
+
+    def open_workspace(self, net_client):
+        from app.core.config import ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN
+        from app.services.sync_service import SyncService
+        from app.ui.head_workspace import HeadWorkspace
+        from app.ui.admin_workspace import AdminWorkspace
+        from app.ui.coo_workspace import CooWorkspace
+        from app.ui.superadmin_workspace import SuperAdminWorkspace
+
+        try:
+            self.login_dialog.rejected.disconnect(self.quit)
+        except (RuntimeError, TypeError):
+            pass
+        self.net_client = net_client
+        user = net_client.user
+        role = user["role"]
+        if role == ROLE_HEAD:
+            self.sync_service = SyncService(net_client, user["user_id"])
+            ws = HeadWorkspace(user, net_client, self.sync_service)
+        elif role == ROLE_ADMIN:
+            ws = AdminWorkspace(user, net_client)
+        elif role == ROLE_COO:
+            ws = CooWorkspace(user, net_client)
+        elif role == ROLE_SUPER_ADMIN:
+            ws = SuperAdminWorkspace(user, net_client)
+        else:
+            logging.error("Unknown role '%s'", role)
+            self.quit()
+            return
+
+        net_client.session_expired.connect(self.on_session_expired)
+        orig_close = ws.closeEvent
+
+        def close_event(event):
+            orig_close(event)
+            if event.isAccepted():
+                self.on_workspace_closed()
+        ws.closeEvent = close_event
+        self.workspace = ws
+        ws.show()
+        if self.sync_service is not None:
+            self.sync_service.schedule_flush()
+
+    def on_session_expired(self, message: str):
+        from PySide6.QtWidgets import QMessageBox
+        if self.workspace is None:
+            return
+        QMessageBox.warning(self.workspace, "Session Ended", message)
+        self.workspace.logout_requested = True
+        self.workspace.close()
+
+    def on_workspace_closed(self):
+        from app.network.client import run_async
+        ws, self.workspace = self.workspace, None
+        if self.sync_service is not None:
+            self.sync_service.stop()
+            self.sync_service = None
+        net, self.net_client = self.net_client, None
+        logout = getattr(ws, "logout_requested", False)
+        if net is not None:
+            run_async(net.logout(), lambda _: None if logout else self.quit(), lambda _: None if logout else self.quit())
+        elif not logout:
+            self.quit()
+        if logout:
+            self.show_login()
+
+    def quit(self):
+        asyncio.get_event_loop().stop()
+
+
+def run_gui(args):
+    from PySide6.QtWidgets import QApplication
+    from qasync import QEventLoop
+    from app.ui.styles import DARK_THEME_QSS
+
+    app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_THEME_QSS)
+    loop = QEventLoop(app)
+    asyncio.set_event_loop(loop)
+
+    if args.standalone:
+        from app.network.server import CentralWebSocketServer
+        if not is_port_in_use(args.port, "127.0.0.1"):
+            logging.info("Starting embedded demo server on port %d (data_demo folder)...", args.port)
+            server = CentralWebSocketServer(host="127.0.0.1", port=args.port, standalone=True)
+            loop.run_until_complete(server.start_background())
+
+    controller = AppController(app, args)
+    loop.call_soon(controller.show_login)
+    with loop:
+        loop.run_forever()
+
+
+def main():
+    args = parse_args()
+    if args.standalone and not os.environ.get("DESKAPP_DATA_DIR"):
+        os.environ["DESKAPP_DEMO"] = "1"
+    if args.server_only:
+        run_server_only(args)
+    else:
+        run_gui(args)
+
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,5 @@
-import uuid
-import json
 from datetime import datetime
-from PySide6.QtCore import Qt, QDate, QSettings
+from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QComboBox, QDateEdit, QTextEdit, QPushButton, QFrame, 
@@ -9,12 +7,13 @@ from PySide6.QtWidgets import (
     QRadioButton, QButtonGroup, QMessageBox, QDialog, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QCompleter
 )
+from app.core.settings import app_settings
 from app.core.config import PROGRESS_STAGES, ENTRY_TYPE_NEW, ENTRY_TYPE_CONTINUATION, ENTRY_TYPE_REVISION
 from app.network.client import NetworkClient
 from app.services.sync_service import SyncService
 from app.ui.components import (
     ToastNotifier, SyncStatusBadge, BlockingCenterModal, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_item
+    setup_modern_table, create_table_item, create_table_action_cell, describe_error
 )
 from app.ui.timeline_widget import ProjectProgressiveTimelineWidget
 
@@ -125,7 +124,7 @@ class DateChangeRequestDialog(QDialog):
         curr_start = task_info.get("planned_start_date") or datetime.now().strftime("%Y-%m-%d")
         curr_end = task_info.get("planned_end_date") or datetime.now().strftime("%Y-%m-%d")
 
-        lbl_curr = QLabel(f"Current Schedule: {curr_start}  ➔  {curr_end}", self)
+        lbl_curr = QLabel(f"Current Schedule: {curr_start} to {curr_end}", self)
         lbl_curr.setStyleSheet("color: #7C3AED; font-weight: bold;")
         layout.addWidget(lbl_curr)
 
@@ -185,20 +184,80 @@ class DateChangeRequestDialog(QDialog):
         }
 
 
+class FailedSubmissionsDialog(QDialog):
+    """Lists items the Central Server rejected, so the Head can fix, retry or discard them."""
+    ACTION_LABELS = {"SUBMIT_LOG": "Progress Log", "PROPOSE_TASK": "Task Request",
+                     "REQUEST_TASK_DATE_CHANGE": "Date Change Request", "RESPOND_NOTIFICATION": "Alert Response"}
+
+    def __init__(self, sync_service: SyncService, parent=None):
+        super().__init__(parent)
+        self.sync = sync_service
+        self.setWindowTitle("Submissions Rejected by the Central Server")
+        self.setMinimumSize(760, 360)
+        layout = QVBoxLayout(self)
+        info = QLabel("These items were not saved. Retry after the cause is fixed (for example after the Admin "
+                      "updates the task), or discard them.", self)
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        self.tbl = QTableWidget(0, 4, self)
+        self.tbl.setHorizontalHeaderLabels(["Type", "Details", "Reason", "Actions"])
+        setup_modern_table(self.tbl, row_height=44)
+        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tbl.setColumnWidth(0, 140)
+        self.tbl.setColumnWidth(1, 220)
+        self.tbl.setColumnWidth(3, 180)
+        layout.addWidget(self.tbl)
+        btn_close = QPushButton("Close", self)
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close, alignment=Qt.AlignRight)
+        self.reload()
+
+    def reload(self):
+        items = self.sync.failed_items()
+        self.tbl.setRowCount(0)
+        for r, it in enumerate(items):
+            pl = it["payload"]
+            details = pl.get("task_id") or pl.get("task_name") or pl.get("notification_id") or it["item_id"]
+            if pl.get("start_date"):
+                details = f"{details} ({pl.get('start_date')})"
+            self.tbl.insertRow(r)
+            self.tbl.setItem(r, 0, create_table_item(self.ACTION_LABELS.get(it["event_type"], it["event_type"])))
+            self.tbl.setItem(r, 1, create_table_item(str(details), Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl.setItem(r, 2, create_table_item(it.get("last_error") or "", Qt.AlignLeft | Qt.AlignVCenter))
+            b_retry = QPushButton("Retry")
+            b_retry.clicked.connect(lambda _, q=it["queue_id"]: self._retry(q))
+            b_discard = QPushButton("Discard")
+            b_discard.setObjectName("DangerButton")
+            b_discard.clicked.connect(lambda _, q=it["queue_id"]: self._discard(q))
+            self.tbl.setCellWidget(r, 3, create_table_action_cell([b_retry, b_discard]))
+
+    def _retry(self, queue_id: int):
+        self.sync.retry_failed(queue_id)
+        self.reload()
+
+    def _discard(self, queue_id: int):
+        if QMessageBox.question(self, "Discard Item", "Permanently discard this unsent item?",
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self.sync.discard_failed(queue_id)
+            self.reload()
+
+
 class HeadWorkspace(QMainWindow):
     """Employee / Head Workstation with Discipline Task Filtering & Resizable Panels (A1, A2, A3, A5, A6)."""
-    def __init__(self, user_dict: dict, db_manager, net_client: NetworkClient, sync_service: SyncService):
+    def __init__(self, user_dict: dict, net_client: NetworkClient, sync_service: SyncService):
         super().__init__()
         self.user = user_dict
         self.user_id = user_dict["user_id"]
         self.discipline_id = user_dict.get("discipline_id")
-        self.db = db_manager
         self.net_client = net_client
         self.sync_service = sync_service
         self.logout_requested = False
 
         self.projects_data = []
         self.tasks_data = []
+        self._open_alerts = {}          # notification_id -> modal currently shown (prevents duplicates)
+        self._awaiting_ack = {}         # item_id -> description, for "saved"/"queued" toasts
 
         self.setWindowTitle(f"Head Workstation - {self.user.get('full_name', self.user_id)} ({self.user_id})")
         self.setMinimumSize(1000, 720)
@@ -221,6 +280,12 @@ class HeadWorkspace(QMainWindow):
         self.sync_badge = SyncStatusBadge(self)
         top_bar.addWidget(self.sync_badge)
 
+        self.btn_failed = QPushButton("Rejected Items (0)", self)
+        self.btn_failed.setObjectName("DangerButton")
+        self.btn_failed.clicked.connect(self.on_open_failed_items)
+        self.btn_failed.setVisible(False)
+        top_bar.addWidget(self.btn_failed)
+
         btn_logout = QPushButton("Logout", self)
         btn_logout.setObjectName("DangerButton")
         btn_logout.clicked.connect(self.on_logout)
@@ -241,16 +306,18 @@ class HeadWorkspace(QMainWindow):
 
         # Network bindings
         self.net_client.connection_status_changed.connect(self.on_net_status_changed)
-        self.net_client.initial_snapshot_received.connect(self.on_initial_snapshot)
         self.net_client.priority_alert_received.connect(self.on_priority_alert)
         self.net_client.task_proposal_event.connect(self.on_task_proposal_event)
         self.net_client.task_date_change_event.connect(self.on_task_date_change_event)
         self.net_client.global_refresh_received.connect(self.request_refresh_from_server)
-        self.net_client.response_received.connect(self.on_server_response)
+        self.sync_service.item_synced.connect(self.on_item_synced)
+        self.sync_service.item_failed.connect(self.on_item_failed)
+        self.sync_service.queue_changed.connect(lambda p, f: self.update_sync_badge())
 
         # Load initial data from server snapshot
         self.request_refresh_from_server()
         self.restore_splitter_states()
+        self.update_sync_badge()
 
     def create_logging_tab(self) -> QWidget:
         widget = QWidget()
@@ -393,7 +460,7 @@ class HeadWorkspace(QMainWindow):
 
     def setup_assigned_to_autocomplete(self):
         """Remembers last entered 'Assigned To' values per Head for faster entry (A5)."""
-        settings = QSettings("SprintsDeskApp", "ClientConfig")
+        settings = app_settings("ClientConfig")
         recent_names = settings.value(f"assigned_to_history_{self.user_id}", [])
         if isinstance(recent_names, list) and recent_names:
             completer = QCompleter(recent_names, self)
@@ -403,7 +470,7 @@ class HeadWorkspace(QMainWindow):
     def save_assigned_to_history(self, name: str):
         if not name:
             return
-        settings = QSettings("SprintsDeskApp", "ClientConfig")
+        settings = app_settings("ClientConfig")
         key = f"assigned_to_history_{self.user_id}"
         recent = settings.value(key, [])
         if not isinstance(recent, list):
@@ -417,44 +484,48 @@ class HeadWorkspace(QMainWindow):
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.txt_assigned_to.setCompleter(completer)
 
-    def restore_splitter_states(self):
-        """Restores resizable splitter positions and collapsed states (A6)."""
-        settings = QSettings("SprintsDeskApp", "ClientConfig")
-        sizes = settings.value(f"HeadWorkspace_Splitter_{self.user_id}")
-        if sizes:
-            try:
-                self.log_splitter.setSizes([int(s) for s in sizes])
-            except Exception:
-                pass
-
-    def closeEvent(self, event):
-        # Save splitter states on close (A6)
-        settings = QSettings("SprintsDeskApp", "ClientConfig")
-        settings.setValue(f"HeadWorkspace_Splitter_{self.user_id}", self.log_splitter.sizes())
-        event.accept()
-
     def request_refresh_from_server(self):
-        self.net_client.send_action("IDENTIFY", {"user_id": self.user_id, "role": self.user["role"]})
-        self.net_client.send_action("GET_TASK_PROPOSALS", {"proposed_by_id": self.user_id})
-        self.net_client.send_action("GET_DATE_CHANGE_REQUESTS", {"requested_by_id": self.user_id})
+        if not self.net_client.is_connected:
+            return
+        self.net_client.call("GET_SNAPSHOT", {}, self.on_initial_snapshot, self.on_request_error)
+        self.net_client.call("GET_TASK_PROPOSALS", {},
+                             lambda r: self.populate_proposals_timeline(r.get("proposals", [])), self.on_request_error)
+        self.net_client.call("GET_DATE_CHANGE_REQUESTS", {},
+                             lambda r: self.populate_date_change_timeline(r.get("requests", [])), self.on_request_error)
+
+    def on_request_error(self, exc):
+        self.toast.show_message(describe_error(exc), is_error=True)
 
     def on_initial_snapshot(self, snapshot: dict):
         self.projects_data = snapshot.get("projects", [])
         self.tasks_data = snapshot.get("tasks", [])
-        self.populate_project_list()
+        selected = self.lst_projects.currentItem().data(Qt.UserRole) if self.lst_projects.currentItem() else None
+        selected_task = self.lst_tasks.currentItem().data(Qt.UserRole) if self.lst_tasks.currentItem() else None
+        self.populate_project_list(selected)
+        if selected_task:
+            for i in range(self.lst_tasks.count()):
+                if self.lst_tasks.item(i).data(Qt.UserRole) == selected_task:
+                    self.lst_tasks.setCurrentRow(i)
+                    break
 
         # Handle pending priority alerts if present
         for notif in snapshot.get("pending_notifications", []):
             self.on_priority_alert({"notification": notif})
 
-    def populate_project_list(self):
+    def populate_project_list(self, keep_project_id: str = None):
+        self.lst_projects.blockSignals(True)
         self.lst_projects.clear()
-        for p in self.projects_data:
+        row_to_select = 0
+        for idx, p in enumerate(self.projects_data):
             item = QListWidgetItem(f"{p['name']} ({p['project_id']})")
             item.setData(Qt.UserRole, p["project_id"])
             self.lst_projects.addItem(item)
+            if p["project_id"] == keep_project_id:
+                row_to_select = idx
+        self.lst_projects.blockSignals(False)
         if self.lst_projects.count() > 0:
-            self.lst_projects.setCurrentRow(0)
+            self.lst_projects.setCurrentRow(row_to_select)
+        self.on_project_selected()
 
     def create_project_timeline_tab(self) -> QWidget:
         widget = QWidget()
@@ -481,7 +552,7 @@ class HeadWorkspace(QMainWindow):
                 p_start = t.get("planned_start_date") or "TBD"
                 p_end = t.get("planned_end_date") or "TBD"
                 dates_tag = f" [{p_start} to {p_end}]"
-                assign_tag = " 👤 [Assigned to You]" if t.get("assigned_head_id") == self.user_id else ("" if not t.get("assigned_head_id") else f" [👤 {t.get('assigned_head_name')}]")
+                assign_tag = " [Assigned to You]" if t.get("assigned_head_id") == self.user_id else ("" if not t.get("assigned_head_id") else f" [{t.get('assigned_head_name')}]")
                 item = QListWidgetItem(f"{t['name']} ({t['task_id']}){dates_tag}{assign_tag}")
                 item.setData(Qt.UserRole, t["task_id"])
                 item.setData(Qt.UserRole + 1, t["project_id"])
@@ -493,7 +564,10 @@ class HeadWorkspace(QMainWindow):
         self.disc_tabs.setTabText(0, tab_title)
 
         # Request progressive project timeline data from server
-        self.net_client.send_action("GET_PROJECT_TIMELINE", {"project_id": p_id})
+        if self.net_client.is_connected:
+            self.net_client.call("GET_PROJECT_TIMELINE", {"project_id": p_id},
+                                 lambda r: self.proj_timeline_widget.load_timeline_data(r.get("data", {})),
+                                 self.on_request_error)
 
     def update_revision_tag_display(self):
         if self.rb_revision.isChecked():
@@ -501,27 +575,16 @@ class HeadWorkspace(QMainWindow):
             if items:
                 task_id = items[0].data(Qt.UserRole)
                 project_id = items[0].data(Qt.UserRole + 1)
-                self.net_client.send_action("CALCULATE_NEXT_REVISION", {
-                    "employee_id": self.user_id,
-                    "project_id": project_id,
-                    "task_id": task_id
-                })
+                if not self.net_client.is_connected:
+                    self.lbl_rev_tag.setText("[Revision Tag: assigned when synced]")
+                    return
+                self.net_client.call("CALCULATE_NEXT_REVISION", {"project_id": project_id, "task_id": task_id},
+                                     lambda r: self.lbl_rev_tag.setText(f"[Revision Tag: R{r.get('revision_number', 1)}]"),
+                                     lambda e: self.lbl_rev_tag.setText("[Revision Tag: assigned when synced]"))
             else:
                 self.lbl_rev_tag.setText("[Revision Tag: R1]")
         else:
             self.lbl_rev_tag.setText("")
-
-    def on_server_response(self, resp_type: str, data: dict):
-        if resp_type == "NEXT_REVISION_RESPONSE":
-            rev = data.get("revision_number", 1)
-            self.lbl_rev_tag.setText(f"[Revision Tag: R{rev}]")
-        elif resp_type == "TASK_PROPOSALS_RESPONSE":
-            self.populate_proposals_timeline(data.get("proposals", []))
-        elif resp_type == "DATE_CHANGE_REQUESTS_RESPONSE":
-            self.populate_date_change_timeline(data.get("requests", []))
-        elif resp_type == "PROJECT_TIMELINE_RESPONSE":
-            if hasattr(self, "proj_timeline_widget"):
-                self.proj_timeline_widget.load_timeline_data(data.get("data", {}))
 
     def on_submit_log(self):
         selected_tasks = self.lst_tasks.selectedItems()
@@ -535,6 +598,9 @@ class HeadWorkspace(QMainWindow):
         notes = self.txt_notes.toPlainText().strip()
         assigned_to = self.txt_assigned_to.text().strip()
 
+        if self.dt_start.date() > self.dt_end.date():
+            self.toast.show_message("Start date cannot be after end date.", is_warning=True)
+            return
         start_str = self.dt_start.date().toString("yyyy-MM-dd")
         end_str = self.dt_end.date().toString("yyyy-MM-dd")
         stage = self.cmb_progress.currentText()
@@ -552,8 +618,6 @@ class HeadWorkspace(QMainWindow):
             rev_num = 0
 
         log_payload = {
-            "log_id": f"LOG-{uuid.uuid4().hex[:8].upper()}",
-            "employee_id": self.user_id,
             "project_id": project_id,
             "task_id": task_id,
             "start_date": start_str,
@@ -567,14 +631,45 @@ class HeadWorkspace(QMainWindow):
             "discipline_id": self.discipline_id
         }
 
-        sent = self.sync_service.submit_progress_log(log_payload)
+        item_id = self.sync_service.submit_progress_log(log_payload)
         self.save_assigned_to_history(assigned_to)
         self.txt_notes.clear()
+        self._track_submission(item_id, "Progress log")
+        self.update_sync_badge()
 
-        if sent:
-            self.toast.show_message("Progress log submitted successfully to Central Server!")
-        else:
-            self.toast.show_message("Offline: Log queued locally. Will sync upon connection.", is_warning=True)
+    def _track_submission(self, item_id: str, label: str):
+        """Shows 'saved' when the server confirms, or 'queued' if it is offline / slow."""
+        if not self.net_client.is_connected:
+            self.toast.show_message(f"Offline: {label} saved on this PC and will be sent automatically when the "
+                                    f"connection returns.", is_warning=True, duration_ms=6000)
+            return
+        self._awaiting_ack[item_id] = label
+
+        def still_waiting():
+            if item_id in self._awaiting_ack:
+                self.toast.show_message(f"{label} queued; it will be sent when the server answers.", is_warning=True)
+        QTimer.singleShot(4000, still_waiting)
+
+    def on_item_synced(self, action: str, item_id: str, reply: dict):
+        label = self._awaiting_ack.pop(item_id, None)
+        if action == "SUBMIT_LOG":
+            log = reply.get("log", {})
+            tag = f" (R{log.get('revision_number')})" if log.get("entry_type") == "REVISION" else ""
+            self.toast.show_message(f"Progress log saved on the Central Server{tag}.")
+        elif label:
+            self.toast.show_message(f"{label} saved on the Central Server.")
+        if action in ("PROPOSE_TASK", "REQUEST_TASK_DATE_CHANGE"):
+            self.request_refresh_from_server()
+        self.update_sync_badge()
+
+    def on_item_failed(self, action: str, item_id: str, error: str):
+        self._awaiting_ack.pop(item_id, None)
+        label = FailedSubmissionsDialog.ACTION_LABELS.get(action, "Item")
+        self.toast.show_message(f"{label} was rejected by the Central Server: {error}", is_error=True, duration_ms=9000)
+        self.update_sync_badge()
+
+    def on_open_failed_items(self):
+        FailedSubmissionsDialog(self.sync_service, self).exec()
         self.update_sync_badge()
 
     def on_open_task_proposal_dialog(self):
@@ -586,17 +681,13 @@ class HeadWorkspace(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             data = dlg.get_data()
             proposal_payload = {
-                "proposal_id": f"PROP-{uuid.uuid4().hex[:8].upper()}",
                 "project_id": data["project_id"],
                 "task_name": data["task_name"],
-                "proposed_by_id": self.user_id,
-                "discipline_id": self.discipline_id,
                 "planned_start_date": data["planned_start_date"],
                 "planned_end_date": data["planned_end_date"]
             }
-            self.sync_service.propose_task(proposal_payload)
-            self.toast.show_message(f"Task proposal for '{data['task_name']}' submitted!")
-            self.request_refresh_from_server()
+            item_id = self.sync_service.propose_task(proposal_payload)
+            self._track_submission(item_id, f"Task request '{data['task_name']}'")
 
     def on_open_date_change_dialog(self):
         selected = self.lst_tasks.selectedItems()
@@ -607,11 +698,8 @@ class HeadWorkspace(QMainWindow):
         dlg = DateChangeRequestDialog(t_data, self)
         if dlg.exec() == QDialog.Accepted:
             req_data = dlg.get_data()
-            req_data["request_id"] = f"DCR-{uuid.uuid4().hex[:8].upper()}"
-            req_data["requested_by_id"] = self.user_id
-            self.sync_service.request_date_change(req_data)
-            self.toast.show_message("Date change request submitted for Admin review!")
-            self.request_refresh_from_server()
+            item_id = self.sync_service.request_date_change(req_data)
+            self._track_submission(item_id, "Date change request")
 
     def on_task_proposal_event(self, data: dict):
         prop = data.get("proposal", {})
@@ -642,26 +730,38 @@ class HeadWorkspace(QMainWindow):
         n_id = notif.get("notification_id")
         coo_id = notif.get("coo_id")
         msg = notif.get("message")
-        if not n_id:
+        if not n_id or n_id in self._open_alerts or self._alert_already_answered(n_id):
             return
 
         modal = BlockingCenterModal(n_id, coo_id, msg, parent=self)
         modal.response_submitted.connect(lambda status: self.on_modal_response(n_id, status))
-        modal.exec()
+        modal.finished.connect(lambda _: self._open_alerts.pop(n_id, None))
+        self._open_alerts[n_id] = modal
+        modal.open()  # window-modal without a nested event loop; still only closable via Accept/Deny
+
+    def _alert_already_answered(self, notif_id: str) -> bool:
+        # An answer may still be waiting in the outbox (offline) - do not ask again
+        return any(it["item_id"] == notif_id
+                   for it in self.sync_service.queue_db.get_items(self.user_id)
+                   if it["event_type"] == "RESPOND_NOTIFICATION")
 
     def on_modal_response(self, notif_id: str, status: str):
-        payload = {"notification_id": notif_id, "employee_id": self.user_id, "response_status": status}
-        self.sync_service.respond_priority_notification(payload)
-        self.toast.show_message(f"Priority response ('{status}') dispatched to COO.")
+        payload = {"notification_id": notif_id, "response_status": status}
+        item_id = self.sync_service.respond_priority_notification(payload)
+        self._track_submission(item_id, f"Response '{status}' to the COO")
 
     def on_net_status_changed(self, is_connected: bool, status_msg: str):
         self.update_sync_badge(is_connected, status_msg)
+        if is_connected:
+            self.request_refresh_from_server()
 
     def update_sync_badge(self, is_connected: bool = None, status_msg: str = ""):
         if is_connected is None:
             is_connected = self.net_client.is_connected
-        pending_cnt = self.sync_service.get_pending_queue_count()
-        self.sync_badge.update_status(is_connected, status_msg, pending_cnt)
+        failed = self.sync_service.failed_count()
+        self.sync_badge.update_status(is_connected, status_msg, self.sync_service.pending_count(), failed)
+        self.btn_failed.setText(f"Rejected Items ({failed})")
+        self.btn_failed.setVisible(failed > 0)
 
     # ----------------- TIMELINE TAB (PROPOSALS & DATE CHANGES) -----------------
     def create_timeline_tab(self) -> QWidget:
@@ -746,7 +846,7 @@ class HeadWorkspace(QMainWindow):
             self.tbl_date_changes.insertRow(r_idx)
             self.tbl_date_changes.setItem(r_idx, 0, create_table_item(req["request_id"], Qt.AlignCenter))
             self.tbl_date_changes.setItem(r_idx, 1, create_table_item(req["task_id"], Qt.AlignCenter))
-            self.tbl_date_changes.setItem(r_idx, 2, create_table_item(f"{req['new_start_date']} ➔ {req['new_end_date']}", Qt.AlignCenter))
+            self.tbl_date_changes.setItem(r_idx, 2, create_table_item(f"{req['new_start_date']} to {req['new_end_date']}", Qt.AlignCenter))
             self.tbl_date_changes.setItem(r_idx, 3, create_table_item(req["reason"], Qt.AlignLeft | Qt.AlignVCenter))
 
             st_item = create_table_item(req["status"], Qt.AlignCenter)
@@ -775,8 +875,8 @@ class HeadWorkspace(QMainWindow):
         w = max(self.width(), 1050)
         sidebar_w = int(w * 0.382)
         content_w = int(w * 0.618)
-        settings = QSettings("SprintsDeskApp", "HeadWorkspace")
-        log_sizes = settings.value("log_splitter_sizes")
+        settings = app_settings("HeadWorkspace")
+        log_sizes = settings.value(f"{self.user_id}/log_splitter_sizes")
         if log_sizes and hasattr(self, "log_splitter"):
             try:
                 self.log_splitter.setSizes([int(x) for x in log_sizes])
@@ -786,8 +886,8 @@ class HeadWorkspace(QMainWindow):
             self.log_splitter.setSizes([sidebar_w, content_w])
 
     def closeEvent(self, event):
-        settings = QSettings("SprintsDeskApp", "HeadWorkspace")
+        settings = app_settings("HeadWorkspace")
         if hasattr(self, "log_splitter"):
-            settings.setValue("log_splitter_sizes", self.log_splitter.sizes())
+            settings.setValue(f"{self.user_id}/log_splitter_sizes", self.log_splitter.sizes())
         super().closeEvent(event)
 

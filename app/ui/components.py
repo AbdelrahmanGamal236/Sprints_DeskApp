@@ -37,7 +37,7 @@ class SyncStatusBadge(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.update_status(False, "Initializing...", 0)
 
-    def update_status(self, is_connected: bool, status_msg: str = "", pending_count: int = 0):
+    def update_status(self, is_connected: bool, status_msg: str = "", pending_count: int = 0, failed_count: int = 0):
         if is_connected:
             self.setObjectName("SyncBadgeConnected")
             text = "Connected (LAN)"
@@ -45,11 +45,25 @@ class SyncStatusBadge(QLabel):
                 text += f" - Syncing {pending_count} pending..."
         else:
             self.setObjectName("SyncBadgeDisconnected")
-            text = f"Disconnected / Offline ({pending_count} queued)"
+            text = f"Offline ({pending_count} queued)"
             if status_msg:
                 text += f" - {status_msg}"
+        if failed_count:
+            text += f" - {failed_count} failed"
         self.setText(text)
         self.setStyleSheet(self.styleSheet()) # Force restyle refresh
+
+
+def describe_error(exc: Exception) -> str:
+    """User-facing text for a failed server request."""
+    from app.network.client import ServerError, OfflineError
+    if isinstance(exc, OfflineError):
+        return "Not connected to the Central Server. Check the network connection and try again."
+    if isinstance(exc, TimeoutError):
+        return str(exc) or "The Central Server did not respond in time."
+    if isinstance(exc, ServerError):
+        return str(exc)
+    return f"Unexpected error: {exc}"
 
 
 class BlockingCenterModal(QDialog):

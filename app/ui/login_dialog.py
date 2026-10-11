@@ -1,23 +1,23 @@
-import asyncio
 import logging
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, 
-    QHBoxLayout, QFrame, QMessageBox, QApplication
+    QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout,
+    QHBoxLayout, QFrame, QMessageBox
 )
+from app.core.settings import app_settings
 from app.core.config import DEFAULT_WS_PORT
-from app.network.client import NetworkClient
-from app.ui.components import CopyrightFooter
+from app.database.db_manager import PASSWORD_MIN_LENGTH
+from app.network.client import NetworkClient, ServerError, OfflineError, run_async
+from app.ui.components import CopyrightFooter, describe_error
 
 logger = logging.getLogger(__name__)
 
 class PasswordChangeDialog(QDialog):
-    """Forced Password Change Dialog on First Login or Admin Reset (B1 - Server Enforced)."""
-    def __init__(self, user_id: str, server_ip: str, port: int = DEFAULT_WS_PORT, parent=None):
+    """Forced password change on first login or after an admin reset, done on the authenticated session."""
+    def __init__(self, user_id: str, net_client: NetworkClient, parent=None):
         super().__init__(parent)
         self.user_id = user_id
-        self.server_ip = server_ip
-        self.port = port
+        self.net_client = net_client
         self.setWindowTitle("Mandatory Password Update")
         self.setMinimumWidth(380)
         self.setModal(True)
@@ -29,7 +29,8 @@ class PasswordChangeDialog(QDialog):
         header.setStyleSheet("font-size: 16px; font-weight: bold; color: #C4B5FD;")
         layout.addWidget(header)
 
-        info = QLabel(f"Welcome, User '{user_id}'. You must update your default password before continuing.", self)
+        info = QLabel(f"Welcome, User '{user_id}'. You must choose a new password before continuing "
+                      f"(at least {PASSWORD_MIN_LENGTH} characters, not your User ID).", self)
         info.setWordWrap(True)
         info.setStyleSheet("color: #94A3B8; font-size: 12px;")
         layout.addWidget(info)
@@ -45,6 +46,7 @@ class PasswordChangeDialog(QDialog):
         lbl_confirm.setObjectName("FieldLabel")
         self.txt_confirm = QLineEdit(self)
         self.txt_confirm.setEchoMode(QLineEdit.Password)
+        self.txt_confirm.returnPressed.connect(self.on_submit)
         layout.addWidget(lbl_confirm)
         layout.addWidget(self.txt_confirm)
 
@@ -55,44 +57,45 @@ class PasswordChangeDialog(QDialog):
         layout.addWidget(CopyrightFooter(self))
 
     def on_submit(self):
-        new_pwd = self.txt_new.text().strip()
-        confirm_pwd = self.txt_confirm.text().strip()
+        new_pwd = self.txt_new.text()
+        confirm_pwd = self.txt_confirm.text()
 
-        if not new_pwd:
-            QMessageBox.warning(self, "Validation Error", "Password cannot be empty.")
+        if len(new_pwd) < PASSWORD_MIN_LENGTH:
+            QMessageBox.warning(self, "Validation Error", f"Password must be at least {PASSWORD_MIN_LENGTH} characters.")
             return
-
         if new_pwd == self.user_id:
             QMessageBox.warning(self, "Validation Error", "New password cannot be the same as your User ID.")
             return
-
         if new_pwd != confirm_pwd:
             QMessageBox.warning(self, "Validation Error", "Passwords do not match.")
             return
 
-        # Change password via Central Server action (B1)
-        try:
-            res = NetworkClient.sync_change_password_server(
-                self.server_ip, self.port, self.user_id, new_pwd, force=True
-            )
-            if res.get("success"):
-                QMessageBox.information(self, "Success", "Password updated successfully!")
-                self.accept()
-            else:
-                QMessageBox.critical(self, "Error", res.get("error", "Failed to update password."))
-        except Exception as e:
-            QMessageBox.critical(self, "Server Error", f"Cannot reach Central Server at {self.server_ip}: {e}")
+        self.btn_submit.setEnabled(False)
+        run_async(self.net_client.change_password(new_pwd), self._on_changed, self._on_failed)
+
+    def _on_changed(self, user):
+        QMessageBox.information(self, "Success", "Password updated successfully.")
+        self.accept()
+
+    def _on_failed(self, exc):
+        self.btn_submit.setEnabled(True)
+        QMessageBox.critical(self, "Password Not Changed", describe_error(exc))
 
 
 class LoginDialog(QDialog):
     """User Login Dialog with Server-Side Authentication & IP Memory (B1, B6)."""
-    def __init__(self, default_server_ip: str = "127.0.0.1", port: int = DEFAULT_WS_PORT, parent=None):
+    # Emitted with the authenticated, connected NetworkClient (password change already done)
+    logged_in = Signal(object)
+
+    def __init__(self, default_server_ip: str = "127.0.0.1", port: int = DEFAULT_WS_PORT, notice: str = "", parent=None):
         super().__init__(parent)
         self.port = port
         self.authenticated_user = None
+        self.net_client = None
+        self._pending_ip = None
 
         # Restore remembered Central Server IP from QSettings (B6)
-        settings = QSettings("SprintsDeskApp", "ClientConfig")
+        settings = app_settings("ClientConfig")
         self.selected_server_ip = settings.value("server_ip", default_server_ip)
 
         self.setWindowTitle("DeskApp Workstation Login")
@@ -135,7 +138,7 @@ class LoginDialog(QDialog):
         lbl_id = QLabel("User Name / ID", right_panel)
         lbl_id.setObjectName("FieldLabel")
         self.txt_id = QLineEdit(right_panel)
-        self.txt_id.setPlaceholderText("e.g. 1001, admin, coo")
+        self.txt_id.setPlaceholderText("Your fingerprint / user ID")
         self.txt_id.setMinimumHeight(40)
         right_layout.addWidget(lbl_id)
         right_layout.addWidget(self.txt_id)
@@ -167,7 +170,8 @@ class LoginDialog(QDialog):
         self.btn_login.clicked.connect(self.on_login)
         right_layout.addWidget(self.btn_login)
 
-        self.lbl_status = QLabel("", right_panel)
+        self.lbl_status = QLabel(notice, right_panel)
+        self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("color: #F59E0B; font-size: 12px;")
         right_layout.addWidget(self.lbl_status)
 
@@ -178,7 +182,7 @@ class LoginDialog(QDialog):
 
     def on_login(self):
         user_id = self.txt_id.text().strip()
-        password = self.txt_pwd.text().strip()
+        password = self.txt_pwd.text()
         server_ip = self.txt_ip.text().strip() or "127.0.0.1"
 
         if not user_id or not password:
@@ -187,43 +191,44 @@ class LoginDialog(QDialog):
 
         self.lbl_status.setText(f"Connecting to Central Server at {server_ip}...")
         self.btn_login.setEnabled(False)
-        QApplication.processEvents()
+        self._pending_ip = server_ip
+        self.net_client = NetworkClient(server_ip=server_ip, port=self.port)
+        run_async(self.net_client.login(user_id, password), self._on_login_ok, self._on_login_failed)
 
-        # Connect to Central Server and authenticate over WebSocket (B1)
-        try:
-            auth_response = NetworkClient.sync_authenticate_server(
-                server_ip, self.port, user_id, password, timeout=3.5
-            )
-        except Exception as e:
-            self.lbl_status.setText("")
-            self.btn_login.setEnabled(True)
+    def _on_login_failed(self, exc):
+        self.lbl_status.setText("")
+        self.btn_login.setEnabled(True)
+        self.net_client = None
+        if isinstance(exc, OfflineError):
             QMessageBox.critical(
                 self, "Connection Error",
-                f"Cannot reach Central Server at {server_ip}\n\nMake sure the Central Server daemon is running and port {self.port} is open."
+                f"Cannot reach Central Server at {self._pending_ip}\n\n"
+                f"Make sure the Central Server is running and port {self.port} is open in its firewall."
             )
-            return
+        elif isinstance(exc, ServerError):
+            QMessageBox.critical(self, "Authentication Failed", str(exc))
+        else:
+            QMessageBox.critical(self, "Login Error", describe_error(exc))
 
+    def _on_login_ok(self, user_data: dict):
         self.btn_login.setEnabled(True)
         self.lbl_status.setText("")
 
-        if not auth_response or not auth_response.get("success"):
-            err_msg = auth_response.get("error", "Invalid User ID or Password.") if auth_response else "Authentication failed."
-            QMessageBox.critical(self, "Authentication Failed", err_msg)
-            return
-
-        # Authentication succeeded
-        user_data = auth_response["user"]
-
         # Persist remembered server IP to QSettings (B6)
-        settings = QSettings("SprintsDeskApp", "ClientConfig")
-        settings.setValue("server_ip", server_ip)
-        self.selected_server_ip = server_ip
+        settings = app_settings("ClientConfig")
+        settings.setValue("server_ip", self._pending_ip)
+        self.selected_server_ip = self._pending_ip
 
-        # Check mandatory password change (B1)
+        # Mandatory password change (also enforced by the server)
         if user_data.get("must_change_password") == 1:
-            pwd_dialog = PasswordChangeDialog(user_id, server_ip, self.port, self)
+            pwd_dialog = PasswordChangeDialog(user_data["user_id"], self.net_client, self)
             if pwd_dialog.exec() != QDialog.Accepted:
+                run_async(self.net_client.logout())
+                self.net_client = None
+                self.txt_pwd.clear()
                 return
+            user_data = self.net_client.user
 
         self.authenticated_user = user_data
+        self.logged_in.emit(self.net_client)
         self.accept()
