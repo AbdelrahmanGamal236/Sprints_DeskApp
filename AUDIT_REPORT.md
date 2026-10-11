@@ -368,3 +368,60 @@ Milestone order follows the audit: security and server correctness first, then d
 5. **Existing `data/central_app.db`:** it holds demo data (`1001`, Project Alpha/Beta, demo tasks) and default accounts. Treat it as disposable test data, or migrate it as real data?
 6. **Server packaging:** two exes in one folder (`DeskApp.exe` GUI, `DeskAppServer.exe` console), or keep one exe and launch the server from the `.bat` with a console-enabled build?
 7. **Delete scope:** should soft delete also apply to disciplines and user accounts (deactivate), or only to projects and tasks as specified?
+
+---
+
+## 8. Status after Phase 2 (2026-10-12)
+
+All milestones (M0 to M6) are complete on branch `stabilization`. All 81 automated tests pass. The details are in `CHANGELOG.md`.
+
+**Decisions applied** (the recommended defaults from Section 7):
+1. Infrastructure is kept as a 10th discipline.
+2. Pinning a task to one Head is kept as an optional feature.
+3. Revision numbers are counted per task.
+4. The first Super Admin gets a one-time password printed on the server console, plus a `--reset-superadmin` recovery command.
+5. The existing database is migrated without deleting anything.
+6. The server runs as a separate console exe (`DeskAppServer.exe`) next to `DeskApp.exe`.
+7. Soft delete covers projects and tasks.
+
+| ID | Status | Fixed in |
+|---|---|---|
+| F-01 Unauthenticated IDENTIFY | Fixed: LOGIN/RESUME sessions; IDENTIFY removed | M1 |
+| F-02 Anonymous forced password change | Fixed | M1 |
+| F-03 No per-action role checks | Fixed: action registry plus a role-matrix test | M1 |
+| F-04 Identity taken from the payload | Fixed | M1 |
+| F-05 Blocking work on the server loop | Fixed: DB and Excel work on their own threads | M1 |
+| F-06 Export over the frame limit | Fixed: chunked export | M1 |
+| F-07 Default weak accounts | Fixed: bootstrap password; legacy defaults rotated | M1 |
+| F-08 First-login change enforced only in the UI | Fixed: enforced by the server; password policy added | M1 |
+| F-09 Errors closed the socket or were silent | Fixed: every request gets a reply | M1 |
+| F-10 Offline queue reliability | Fixed: per user, delete after confirmation, rejected items shown | M1 |
+| F-11 32-bit IDs | Fixed: full UUIDs | M1 |
+| F-12 Revision number set by the client | Fixed: assigned by the server, per task | M2 |
+| F-13 No approval state machine | Fixed | M2 |
+| F-14 SQLite configuration / races | Fixed: WAL, foreign keys, BEGIN IMMEDIATE, versioned migrations | M2 |
+| F-15 Analytics multiplied counts | Fixed | M4 |
+| F-16 No soft delete | Fixed | M2 |
+| F-17 Replies not matched to requests | Fixed: msg_id futures; real panels | M1, M3 |
+| F-18 Backups only at startup | Fixed: daily schedule, integrity check, retention, restore | M6 |
+| F-19 Frozen server had no console or log | Fixed: `DeskAppServer.exe` with console, log files | M6 |
+| F-20 GUI froze during login | Fixed: async login | M1 |
+| F-21 Duplicate alert modals; no alert history | Fixed | M1, M3 |
+| F-22 Head form gaps and layout | Fixed: percentage, date checks, project selector on top, bottom notifications | M2, M3, M5 |
+| F-23 Export filter gaps | Fixed: date overlap, COO filters, labels | M4 |
+| F-24 No server-side validation | Fixed | M2 |
+| F-25 Mixed UTC/local timestamps | Fixed for log times. Old created_at metadata stays UTC (not shown in reports) | M2 |
+| F-26 Emojis; layout not saved per user | Fixed | M3, M5 |
+| F-27 Password hashing and throttling | Fixed: 600k iterations, constant-time compare, lockout | M1 |
+| F-28 Slow queries | Fixed: timeline in one query, targeted refresh events | M3, M4 |
+| F-29 Tests weak and not isolated | Fixed: 16 to 81 tests, isolated from real data | M0 to M6 |
+| F-30 No pinned dependencies; numpy bundled | Fixed: requirements files; build 240 MB to 122 MB | M0, M6 |
+| F-31 Spec deviations | Resolved per the decisions above | M2 |
+| F-32 `rebuild_db.py` / `--standalone` dangers | Fixed: script removed; demo uses `data_demo/` | M1, M6 |
+| F-33 No log files | Fixed: rotating server and client logs | M6 |
+| F-34 Duplicated code | Reduced: shared RoleWindow, ExportPanel, BusyButton | M3 to M5 |
+| F-35 Misleading docs | Fixed: workflow document rewritten | M6 |
+| F-36 Uncommitted baseline | Fixed | M0 |
+
+**Not verified here (needs real hardware):**
+- Clicking through the GUI on physical PCs across a real LAN, and the Windows Firewall prompt. I verified them with the headless GUI test, offscreen screenshots, and the frozen exes on one PC.

@@ -1,469 +1,300 @@
 ================================================================================
-SPRINTS DESKAPP - COMPLETE APPLICATION WORKFLOW & FUNCTION DIRECTORY
+DESKAPP 2.0 - APPLICATION WORKFLOW & FUNCTION DIRECTORY
 ================================================================================
-Updated Reference Documentation (Multi-PC LAN, Air-Gapped, Discipline Engine)
+Matches the code on branch "stabilization" (protocol version 2, schema version 4).
 Developers: Eng. Abdelrahman Gamal & Eng. Tolimy
-================================================================================
+For installation see DEPLOYMENT.md; for development rules see CLAUDE.md.
 
-TABLE OF CONTENTS:
---------------------------------------------------------------------------------
-1. Architectural Topology & Multi-PC Air-Gapped Network Design
-2. Technology Stack & Key Dependencies
-3. Central & Client Database Schemas (central_app.db & client_queue.db)
-4. Core Business Workflows:
-   4.1 Multi-PC Server Boot, Standalone Mode & Daemon Operation
-   4.2 Server-Side Authentication & Forced Password Reset
-   4.3 Discipline (Departmental) Engine & Multi-Head Assignment
-   4.4 Per-Task Planned Schedules & Date Change Approval Workflow
-   4.5 Employee (Head) Workstation: Progress Logging, Rework Counter & Autocomplete
-   4.6 Task Proposal, Auto-ID Generation & Audit Sequence Timeline
-   4.7 Urgent COO Executive Oversight & Blocking Priority Modal
-   4.8 Admin & Super Admin Roles, Permissions & Lifecycle Management
-   4.9 Reliable ACK-Based Offline Auto-Sync Engine (Zero Loss, Zero Duplicates)
-   4.10 Analytics & Performance Insights Engine
-   4.11 Server-Generated Multi-Sheet Excel Reports with Discipline Filtering
-   4.12 Resizable & Collapsible Panel Design System (QSplitters + QSettings)
-   4.13 Automated Daily SQLite Backups & Retention
-5. Complete Module, Class & Method Directory
-6. Developer Cheat Sheet: Extending & Modifying Features
-7. Testing & Build Instructions (PyInstaller Executable)
+CONTENTS
+  1. Topology
+  2. Technology stack
+  3. Databases
+  4. Workflows
+  5. Server actions and permissions
+  6. Module, class and function directory
+  7. Testing and building
 
 ================================================================================
-1. ARCHITECTURAL TOPOLOGY & MULTI-PC AIR-GAPPED NETWORK DESIGN
+1. TOPOLOGY (air-gapped LAN, no internet anywhere)
 ================================================================================
-DeskApp is engineered for strict air-gapped Local Area Networks (LAN) without
-any external internet connectivity or third-party cloud infrastructure.
+  Central Server PC                          Workstation PCs (any number)
+  -----------------                          -----------------------------
+  DeskAppServer.exe  (main.py --server-only)  DeskApp.exe  (main.py)
+   - the ONLY process that opens               - login window -> role workspace
+     data/central_app.db (SQLite, WAL)         - talks to the server only through
+   - WebSocket server on TCP 8765                ws://<server-ip>:8765
+   - authenticates every connection            - Heads: offline outbox
+   - enforces every permission/filter            data/client_queue.db
+   - daily backups to data/backups/            - remembers server IP and window
+   - log file data/logs/server.log               layout (QSettings), log file
+                                                 data/logs/client.log
 
-Topology Diagram:
---------------------------------------------------------------------------------
-                         LOCAL AREA NETWORK (LAN)
-                         
-             [ Central Server Daemon ] (Port 8765)
-             - Run via Launch_Server_Daemon.bat (main.py --server-only)
-             - Sole process with read/write access to central_app.db (WAL mode)
-             - Automated daily backups in data/backups/ (last 30 retained)
-             - Handles authentication, business logic, role checks & exports
-                           ^               ^               ^
-                           |               |               |
-             ws://IP:8765  |  ws://IP:8765 |  ws://IP:8765 |
-                           v               v               v
-             +---------------+   +---------------+   +---------------+
-             | Head / Worker |   | Admin Portal  |   | COO / Super   |
-             | Workstation   |   | Workstation   |   | Workstation   |
-             | - Client only |   | - Client only |   | - Client only |
-             | - Local Queue |   | - Full tasks  |   | - Live feed   |
-             |   (client_queue|   | - Approvals   |   | - Modal alert |
-             | - No direct DB|   | - No direct DB|   | - No direct DB|
-             +---------------+   +---------------+   +---------------+
-
-Key Structural Rules (Multi-PC Correctness):
-1. Clients Never Read central_app.db Directly: Clients request all snapshots,
-   tasks, users, analytics, and Excel exports over WebSockets.
-2. Server-Enforced Authentication: The client connects to the Central Server
-   first and verifies credentials over WebSocket (LOGIN action).
-3. No Accidental Embedded Servers: Normal launches run as pure clients.
-   The server only runs with --server-only (or --standalone for single-PC tests).
-4. Reliable Queue with ACKs: Client generates UUIDs before queuing. Items are
-   deleted from the client queue only upon receiving an ACK from the server.
-   Duplicate submissions are handled idempotently.
+  Rules
+  - Clients never read central_app.db.
+  - A normal launch never starts a server. "--standalone" (demo) starts an
+    embedded server using a separate data_demo/ folder.
+  - Identity comes from the authenticated session on the server, never from
+    data a client sends.
 
 ================================================================================
-2. TECHNOLOGY STACK & KEY DEPENDENCIES
+2. TECHNOLOGY STACK (pinned in requirements.txt)
 ================================================================================
-- Language: Python 3.10+
-- GUI Framework: PySide6 (Qt 6 for Python) with Dark Zinc & Purple QSS theme
-- Asynchronous Engine: qasync (Asyncio event loop integrated into Qt)
-- Network Transport: websockets (Asynchronous bi-directional WebSocket protocol)
-- Database: SQLite 3 (WAL mode enabled, thread-safe with contextmanager auto-close)
-- Excel Reporting: openpyxl (Multi-sheet workbooks with styles, fills & auto-widths)
-- Desktop Packaging: PyInstaller (Standalone binary executable)
-- Automated Testing: pytest (Test suite with 100% feature coverage)
+  Python 3.10 | PySide6 6.11 (Qt) | qasync 0.28 (asyncio inside Qt) |
+  websockets 12 | SQLite 3 (WAL, foreign keys on) | openpyxl 3.1 (write-only
+  workbooks) | pytest | PyInstaller 5.13 (two programs in dist/DeskApp/).
 
 ================================================================================
-3. CENTRAL & CLIENT DATABASE SCHEMAS
+3. DATABASES
 ================================================================================
+A. data/central_app.db (server only). Schema version in PRAGMA user_version.
+  disciplines        discipline_id PK, name, is_hidden, created_at
+  users              user_id PK (fingerprint ID or name), full_name,
+                     password_hash ("pbkdf2_sha256$600000$<hex>"),
+                     password_salt, role (HEAD|ADMIN|COO|SUPER_ADMIN),
+                     must_change_password, discipline_id (Heads only)
+  projects           project_id PK, name, description, is_hidden,
+                     is_deleted, deleted_at, deleted_by
+  tasks              task_id PK (TSK-NN), project_id, name, description,
+                     discipline_id, planned_start_date, planned_end_date,
+                     assigned_head_id (optional: pin task to one Head),
+                     proposed_by_id, is_hidden, is_deleted, deleted_at,
+                     deleted_by
+  progress_logs      log_id PK (client UUID), employee_id, project_id,
+                     task_id, start_date, end_date, progress_percentage
+                     (0-100), progress_stage (In Progress|Revision|Hold|Done),
+                     entry_type (NEW|CONTINUATION|REVISION), revision_number
+                     (server-assigned per task), notes, discipline_id (Head's),
+                     assigned_to (free text), submitted_at (local time)
+  task_proposals     proposal_id PK (client UUID), project_id, task_name,
+                     proposed_by_id, discipline_id, planned dates, status
+                     (PENDING|APPROVED|REJECTED), task_id (set on approval),
+                     admin_id, rejection_reason, created_at, decided_at
+  task_date_change_requests  request_id PK (client UUID), task_id,
+                     requested_by_id, old/new start+end dates, reason, status,
+                     admin_id, rejection_reason, created_at, decided_at
+  priority_notifications  notification_id PK, coo_id, target_employee_id,
+                     message, status (PENDING|ACCEPTED|DENIED), created_at,
+                     responded_at
+  user_sessions      token_hash PK (SHA-256 of session token), user_id,
+                     created_at, expires_at
+  system_settings    key PK, value, updated_at, updated_by
+                     keys: backup_retention_count, backup_time,
+                     password_min_length, session_lifetime_days
+  employee_projects  legacy table, kept but no longer used
 
-A. Central Database ("data/central_app.db" - Server Only)
---------------------------------------------------------------------------------
-1. disciplines:
-   - discipline_id (TEXT, PK): Code (URB, STR, INT, ARC, BIM, MEC, ELE, AI, QC, Infrastructure)
-   - name (TEXT): Display title (Urban, Structure, Interior, etc.)
-   - is_hidden (INTEGER, default 0): 0 = Active, 1 = Soft-deleted/hidden
-   - created_at (TIMESTAMP)
+  Migrations (DBManager._migrate): v2 soft-delete columns + indexes;
+  v3 old UTC log timestamps -> local time; v4 system_settings. Each step runs
+  once, in a transaction, and never deletes data.
 
-2. users:
-   - user_id (TEXT, PK): Unique ID / username (e.g. 1001, admin, coo)
-   - full_name (TEXT): Display name (e.g. Eng. Karim Ashraf)
-   - password_hash (TEXT): PBKDF2-HMAC-SHA256 hash (100,000 rounds)
-   - password_salt (TEXT): 16-byte random salt hex
-   - role (TEXT): 'HEAD', 'ADMIN', 'COO', 'SUPER_ADMIN'
-   - must_change_password (INTEGER): 1 = Mandatory password change on login, 0 = Active
-   - discipline_id (TEXT, FK -> disciplines): Head employee's assigned discipline
-   - created_at (TIMESTAMP)
-
-3. projects:
-   - project_id (TEXT, PK): Project code (e.g. PRJ-01)
-   - name (TEXT): Project title
-   - description (TEXT): Project details
-   - is_hidden (INTEGER, default 0): 0 = Active, 1 = Soft-hidden
-   - created_at (TIMESTAMP)
-
-4. tasks:
-   - task_id (TEXT, PK): Task ID (e.g. TSK-01, auto-generated sequentially)
-   - project_id (TEXT, FK -> projects)
-   - name (TEXT): Task title
-   - description (TEXT)
-   - is_hidden (INTEGER, default 0)
-   - proposed_by_id (TEXT, FK -> users): Attributed Head proposer (if proposed)
-   - discipline_id (TEXT, FK -> disciplines): Department this task belongs to
-   - planned_start_date (TEXT, YYYY-MM-DD): Target scheduled start
-   - planned_end_date (TEXT, YYYY-MM-DD): Target scheduled end
-   - assigned_head_id (TEXT, FK -> users): Assigned discipline Head (or NULL for all discipline Heads)
-   - created_at (TIMESTAMP)
-
-5. employee_projects:
-   - employee_id (TEXT, FK -> users)
-   - project_id (TEXT, FK -> projects)
-   - assigned_at (TIMESTAMP)
-   - PRIMARY KEY (employee_id, project_id)
-
-6. progress_logs:
-   - log_id (TEXT, PK): Unique UUID (e.g. LOG-XXXXXXXX)
-   - employee_id (TEXT, FK -> users)
-   - project_id (TEXT, FK -> projects)
-   - task_id (TEXT, FK -> tasks)
-   - start_date (TEXT): Actual work start date
-   - end_date (TEXT): Actual work end date
-   - progress_percentage (INTEGER): 0 - 100
-   - progress_stage (TEXT): 'In Progress', 'Revision', 'Hold', 'Done'
-   - entry_type (TEXT): 'NEW', 'CONTINUATION', 'REVISION'
-   - revision_number (INTEGER): Incremental rework index (0 for new, 1..N for rework)
-   - notes (TEXT): Activity notes & blockers
-   - discipline_id (TEXT, FK -> disciplines): Snapshot of discipline at time of log
-   - assigned_to (TEXT): Free-text name of team member who executed task
-   - submitted_at (TIMESTAMP)
-   - sync_status (TEXT): 'SYNCED'
-
-7. priority_notifications:
-   - notification_id (TEXT, PK): NOTIF-XXXXXXXX
-   - coo_id (TEXT, FK -> users)
-   - target_employee_id (TEXT, FK -> users)
-   - message (TEXT)
-   - status (TEXT): 'PENDING', 'ACCEPTED', 'DENIED'
-   - created_at (TIMESTAMP)
-   - responded_at (TIMESTAMP)
-
-8. task_proposals:
-   - proposal_id (TEXT, PK): PROP-XXXXXXXX
-   - task_id (TEXT): Pre-allocated ID (e.g. TSK-04)
-   - project_id (TEXT, FK -> projects)
-   - task_name (TEXT)
-   - proposed_by_id (TEXT, FK -> users)
-   - discipline_id (TEXT, FK -> disciplines): Automatically tagged from Head's discipline
-   - planned_start_date (TEXT)
-   - planned_end_date (TEXT)
-   - status (TEXT): 'PENDING', 'APPROVED', 'REJECTED'
-   - admin_id (TEXT)
-   - rejection_reason (TEXT): Mandatory if rejected
-   - created_at (TIMESTAMP)
-   - decided_at (TIMESTAMP)
-
-9. task_date_change_requests:
-   - request_id (TEXT, PK): DCR-XXXXXXXX
-   - task_id (TEXT, FK -> tasks)
-   - requested_by_id (TEXT, FK -> users)
-   - old_start_date (TEXT)
-   - old_end_date (TEXT)
-   - new_start_date (TEXT)
-   - new_end_date (TEXT)
-   - reason (TEXT): Mandatory justification from Head
-   - status (TEXT): 'PENDING', 'APPROVED', 'REJECTED'
-   - admin_id (TEXT)
-   - rejection_reason (TEXT): Mandatory feedback from Admin if rejected
-   - created_at (TIMESTAMP)
-   - decided_at (TIMESTAMP)
-
-B. Client Offline Database ("data/client_queue.db" - Local Workstation)
---------------------------------------------------------------------------------
-1. offline_queue:
-   - queue_id (INTEGER, PK AUTOINCREMENT)
-   - event_type (TEXT): 'SUBMIT_LOG', 'RESPOND_NOTIFICATION', 'PROPOSE_TASK', etc.
-   - payload_json (TEXT): Serialized JSON payload containing generated UUID
-   - created_at (TIMESTAMP)
+B. data/client_queue.db (each workstation)
+  offline_queue      queue_id, user_id, event_type (SUBMIT_LOG|PROPOSE_TASK|
+                     REQUEST_TASK_DATE_CHANGE|RESPOND_NOTIFICATION), item_id,
+                     payload_json, status (PENDING|FAILED), last_error,
+                     attempts, created_at
 
 ================================================================================
-4. CORE BUSINESS WORKFLOWS
+4. WORKFLOWS
 ================================================================================
+4.1 Server start
+  1. DBManager opens/creates central_app.db, runs migrations, seeds the 10
+     disciplines and the Heads in data/seed_heads.json (idempotent; skips
+     placeholders, duplicates and unknown disciplines; never overwrites).
+  2. If there is no Super Admin, "superadmin" is created with a random one-time
+     password; never-used legacy default accounts (admin/coo/superadmin with
+     password = ID) get one too. Shown on the console and saved to
+     data/FIRST_RUN_CREDENTIALS.txt.
+  3. WebSocket server listens on 0.0.0.0:8765; BackupScheduler starts.
 
-4.1 Multi-PC Server Boot, Standalone Mode & Daemon Operation
---------------------------------------------------------------------------------
-- Dedicated Central Server:
-  * Launched via Launch_Server_Daemon.bat (main.py --server-only --port 8765).
-  * Runs headlessly without GUI.
-  * Manages database backups and real-time WebSocket communication.
-- Workstation GUI Clients:
-  * Launched via Launch_DeskApp.bat (main.py).
-  * Runs as pure clients; never starts an embedded server by accident.
-- Standalone Testing Mode (--standalone):
-  * Starts embedded server + GUI client in a single process for local development.
+4.2 Login and first-login password change
+  1. LoginDialog (server IP remembered) -> NetworkClient.login() opens the
+     persistent connection and sends LOGIN {user_id, password, protocol}.
+  2. Server checks the password (5 failures = 60 s lockout), binds a Session
+     (identity/role/discipline from the DB) and returns a session token and
+     the password policy.
+  3. If must_change_password: PasswordChangeDialog -> CHANGE_PASSWORD on the
+     same session (old password waived only for this forced change). Until
+     then the server refuses every other action.
+  4. AppController opens the role window. On a network drop the client
+     reconnects and sends RESUME {session_token}; if the session was revoked
+     (password reset) or expired, the user is returned to the login window.
 
-4.2 Server-Side Authentication & Forced Password Reset
---------------------------------------------------------------------------------
-1. LoginDialog opens and retrieves remembered Server IP from client QSettings.
-2. User enters User ID, Password, and Server IP -> clicks Login.
-3. Client establishes WebSocket handshake to ws://<server-ip>:8765 and sends
-   {"action": "LOGIN", "payload": {"user_id": ..., "password": ...}}.
-4. Central Server verifies credentials against central_app.db.
-5. If server is unreachable, displays: "Cannot reach Central Server at <IP>".
-6. If must_change_password == 1, PasswordChangeDialog forces new password
-   entry via server action CHANGE_PASSWORD before workstation access.
+4.3 Head: daily log
+  - Project selector on top; the discipline tab lists only the Head's
+    discipline tasks for that project (server-filtered; pinned tasks only for
+    their Head).
+  - Form: start/end date, entry type (New/Continuation/Revision; the R-number
+    preview comes from the server, the final number is assigned on save),
+    progress stage and %, Assigned To, notes -> Submit.
+  - SyncService writes the log to client_queue.db, sends SUBMIT_LOG, and
+    deletes it only after the server confirms. Toast: "saved on the Central
+    Server (R2)", "queued offline", or "rejected: reason".
+  - Server validates everything (dates, stage, %, lengths, task belongs to the
+    project and the Head's discipline, task active) and stores the row
+    idempotently by log_id.
 
-4.3 Discipline (Departmental) Engine & Multi-Head Assignment
---------------------------------------------------------------------------------
-- Ten standard disciplines:
-  Urban (URB), Structure (STR), Interior (INT), Architectural (ARC), BIM (BIM),
-  Mechanical (MEC), Electrical (ELE), AI (AI), QC (QC), Infrastructure (Infrastructure).
-- Multiple Heads can belong to the same discipline (e.g. two BIM Heads).
-- Initial Heads are seeded from data/seed_heads.json. Any placeholder IDs
-  (<FINGERPRINT_ID>), empty entries, or duplicates are skipped with warnings.
-- Server-Enforced Discipline Filtering:
-  * In INITIAL_SNAPSHOT and GET_TASKS, server filters tasks to Head's discipline.
-  * In SUBMIT_LOG, server rejects any log for a task outside Head's discipline.
-  * Heads with no discipline see an empty task list with "Contact Admin".
+4.4 Offline queue
+  - Offline: items stay PENDING; the red banner and badge say so.
+  - Reconnect / every 30 s: items are sent in order. Server error codes
+    FORBIDDEN/VALIDATION -> item becomes FAILED ("Rejected Items" button:
+    Retry/Discard). Network errors -> retried later.
+  - The queue is per user: another user on the same PC never sends it.
 
-4.4 Per-Task Planned Schedules & Date Change Approval Workflow
---------------------------------------------------------------------------------
-- Tasks hold planned_start_date and planned_end_date.
-- Admins set planned dates on task creation and can edit directly.
-- Heads cannot edit dates directly. Instead, click "Request Date Change" ->
-  enters new dates and mandatory justification reason.
-- Request is dispatched (REQUEST_TASK_DATE_CHANGE) and appears in Admin's
-  "Date Change Requests" sub-tab with badge count.
-- Admin Approves: Task dates update in DB, broadcasts GLOBAL_DATA_REFRESH.
-- Admin Rejects: Mandatory reason entered, requesting Head receives toast alert.
-- Audit history is preserved in task_date_change_requests.
+4.5 Task proposal (Head -> Admin)
+  PROPOSE_TASK {proposal_id, project_id, task_name, dates} -> PENDING.
+  Admin approves (creates task TSK-NN) or rejects with a mandatory reason.
+  Only PENDING can be decided; approving twice is a no-op. The proposer and
+  the managers get a DATA_CHANGED("proposals") event; all clients get
+  DATA_CHANGED("tasks") on approval.
 
-4.5 Employee (Head) Workstation: Progress Logging, Rework Counter & Autocomplete
---------------------------------------------------------------------------------
-- Top: Project selector.
-- Below: Discipline tab showing Head's discipline tasks with count (e.g. Structure (12)).
-- Dates, Status, Notes, and Task Logging Context (New, Continuation, Revision).
-- Rework iterations (R1, R2, R3...) calculated sequentially.
-- "Assigned To" free-text field (max 100 chars) for team member names.
-  Remembers last entered values per user via QSettings with QCompleter.
+4.6 Date change request (Head -> Admin)
+  REQUEST_TASK_DATE_CHANGE {request_id, task_id, new dates, mandatory reason}
+  for a task in the Head's discipline. Approve updates the task's planned
+  dates; reject needs a reason. Same PENDING-only rules as 4.5.
 
-4.6 Task Proposal, Auto-ID Generation & Audit Sequence Timeline
---------------------------------------------------------------------------------
-- Head clicks "+ Request Task" -> TaskProposalDialog automatically tags
-  proposal with Head's discipline and auto-generates next ID (TSK-XX).
-- Appears under Admin "Pending Approvals" tab.
-- Admin Approves -> Task inserted into tasks table with origin attribution [By: Name].
-- Admin Rejects -> Mandatory rejection reason provided.
-- Both Head and Admin view full history in Audit Timeline.
+4.7 COO priority alert
+  COO_NOTIFY {notification_id, target_employee_id, message} -> delivered at
+  once if the Head is online, otherwise at their next login. The Head sees one
+  blocking modal per alert (Accept/Deny only, cannot be closed otherwise).
+  RESPOND_NOTIFICATION is accepted only from the targeted Head; the COO's
+  tracker updates live and keeps history (GET_NOTIFICATIONS).
 
-4.7 Urgent COO Executive Oversight & Blocking Priority Modal
---------------------------------------------------------------------------------
-- COO monitors real-time submissions feed (including "Assigned To" column).
-- COO dispatches urgent priority alert to target Head employee.
-- BlockingCenterModal pops up on Head's workstation:
-  * Window close (Alt+F4) and ESC key are disabled.
-  * Head must explicitly click ACCEPT or DENY.
-- Response delivers live back to COO tracker.
+4.8 Admin
+  Heads: create (initial password = ID), edit name/discipline, reset password
+  (revokes their sessions). Projects: add / hide / delete. Tasks: add (with
+  discipline, planned dates, optional pinned Head) / edit / hide / delete.
+  Disciplines: add / hide. Delete = soft delete. Approvals (4.5, 4.6),
+  analytics, project timeline, Excel export.
 
-4.8 Admin & Super Admin Roles, Permissions & Lifecycle Management
---------------------------------------------------------------------------------
-- Server Role Enforcement:
-  * Admin can create and manage HEAD accounts only.
-  * Super Admin can create and manage ADMIN, COO, HEAD, and SUPER_ADMIN accounts.
-- Soft-Delete / Hide Toggle for projects, tasks, and disciplines.
+4.9 Super Admin
+  Everything Admin and COO can do (their panels are embedded) plus: create and
+  edit ADMIN/COO/SUPER_ADMIN accounts (the last Super Admin cannot be
+  demoted) and System Settings (backup time and retention, password minimum
+  length, session lifetime) with server status.
 
-4.9 Reliable ACK-Based Offline Auto-Sync Engine
---------------------------------------------------------------------------------
-- Client generates UUID log_id before queuing in client_queue.db.
-- Submissions are sent to server if online, or queued if offline.
-- Server returns ACK upon database write.
-- Client deletes item from queue ONLY after receiving ACK.
-- Duplicate resends are handled idempotently by server.
+4.10 Excel export (server-side)
+  EXPORT_EXCEL_REQUEST {project_id, discipline_id, employee_id, start_date,
+  end_date}. The date range uses overlap: a log counts if its start-end period
+  touches the range. Workbook: "All Logs", one sheet per discipline (when not
+  filtered to one), "Report Info" (filters, rule, row count, generated
+  at/by). Hidden/deleted projects, tasks and disciplines are labelled and shown
+  in grey. Built on its own thread and sent in chunks.
 
-4.10 Analytics & Performance Insights Engine
---------------------------------------------------------------------------------
-- Metrics cards: Total Logs, Total Revisions, Active Projects, Active Heads.
-- Employee Rework Breakdown: New Tasks vs Continuations vs Revisions.
-- Project Task Status Breakdown: Done, In Progress, Hold, Revisions.
+4.11 Real-time updates
+  After each change the server sends DATA_CHANGED {scopes} only to the roles
+  and users concerned; screens reload only those scopes (debounced). New logs
+  stream to Admin/COO/Super Admin as NEW_LOG_EVENT.
 
-4.11 Server-Generated Multi-Sheet Excel Reports with Discipline Filtering
---------------------------------------------------------------------------------
-- Server generates styled XLSX reports via openpyxl.
-- Includes Task Discipline, Head Discipline, and Assigned To columns.
-- Discipline = All creates "All Logs" sheet plus one sheet per discipline.
-- Binary sent to client over WebSocket -> client opens Save As dialog.
-
-4.12 Resizable & Collapsible Panel Design System
---------------------------------------------------------------------------------
-- All workspaces use QSplitters for flexible layout resizing.
-- CollapsiblePanel wraps panels with chevron toggle button (▼ / ◀ / ▲).
-- Splitter sizes and collapsed states saved/restored per user in QSettings.
-
-4.13 Automated Daily SQLite Backups & Retention
---------------------------------------------------------------------------------
-- Central Server triggers backup on boot and daily using SQLite backup API.
-- Stores in data/backups/central_app_YYYYMMDD.db.
-- Automatically retains last 30 daily copies.
+4.12 Backups, restore, recovery
+  BackupScheduler: a backup at startup if none exists for today, then daily at
+  backup_time. SQLite backup API, integrity-checked, newest N kept
+  (central_app_YYYYMMDD_HHMMSS.db). With the server stopped:
+  "DeskAppServer.exe --restore <file>" (saves the current DB as
+  central_app_pre_restore_*.db first) and "--reset-superadmin".
 
 ================================================================================
-5. COMPLETE MODULE, CLASS & METHOD DIRECTORY
+5. SERVER ACTIONS AND PERMISSIONS  (H=Head A=Admin C=COO S=Super Admin)
 ================================================================================
+  Public (no login):   PING, LOGIN, RESUME
+  Any logged-in role:  LOGOUT, CHANGE_PASSWORD, GET_SNAPSHOT, GET_DISCIPLINES,
+                       GET_PROJECTS, GET_TASKS, GET_PROJECT_TIMELINE
+                       (Heads: own discipline only; hidden items for A/S only)
+  H only:              SUBMIT_LOG, CALCULATE_NEXT_REVISION, PROPOSE_TASK,
+                       REQUEST_TASK_DATE_CHANGE, RESPOND_NOTIFICATION
+  H, A, S:             GET_TASK_PROPOSALS, GET_DATE_CHANGE_REQUESTS (H: own)
+  H, C, S:             GET_NOTIFICATIONS (H: own)
+  A, S:                APPROVE/REJECT_TASK_PROPOSAL, APPROVE/REJECT_DATE_CHANGE,
+                       ADD_DISCIPLINE, TOGGLE_HIDE_DISCIPLINE, CREATE_USER,
+                       UPDATE_USER, RESET_PASSWORD (A: Heads only),
+                       ADD_PROJECT, TOGGLE_HIDE_PROJECT, DELETE_PROJECT,
+                       ADD_TASK, UPDATE_TASK, UPDATE_TASK_DATES,
+                       TOGGLE_HIDE_TASK, DELETE_TASK, GENERATE_NEXT_TASK_ID,
+                       GET_ANALYTICS
+  A, C, S:             GET_USERS (A and C: Heads only), GET_RECENT_LOGS,
+                       EXPORT_EXCEL_REQUEST
+  C, S:                COO_NOTIFY
+  S only:              GET_SETTINGS, UPDATE_SETTINGS
+  Error codes: AUTH_REQUIRED, SESSION_EXPIRED, PASSWORD_CHANGE_REQUIRED,
+  FORBIDDEN, VALIDATION, UNKNOWN_ACTION, BAD_REQUEST, RATE_LIMITED, INTERNAL.
 
+================================================================================
+6. MODULE, CLASS AND FUNCTION DIRECTORY
+================================================================================
 main.py
-- is_port_in_use(port, host): Port availability check.
-- run_server_task(host, port, standalone): Launches CentralWebSocketServer.
-- async_main(app, args): Application lifecycle, login, and workspace routing.
-- main(): CLI entrypoint supporting --server-only and --standalone.
+  parse_args, main            CLI: --server-only --standalone --port --host
+                              --server-ip --data-dir --restore --yes
+                              --reset-superadmin --version
+  run_server_only             logging + CentralWebSocketServer + credentials
+  run_restore, run_reset_superadmin   maintenance commands (server stopped)
+  AppController               login -> workspace -> logout/session expiry
+server_main.py                entry of DeskAppServer.exe (defaults to server)
 
-app/core/config.py
-- BASE_DIR, DATA_DIR, BACKUPS_DIR, SEED_HEADS_PATH, CENTRAL_DB_PATH, CLIENT_QUEUE_DB_PATH
-- DEFAULT_WS_PORT (8765), DEFAULT_HOST ("0.0.0.0")
-- PROGRESS_STAGES, ENTRY_TYPE_NEW, ENTRY_TYPE_CONTINUATION, ENTRY_TYPE_REVISION
-- ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN, ALL_ROLES
-- DEFAULT_DISCIPLINES (10 default disciplines tuple list)
-
-app/core/auth.py
-- hash_password(password, salt): PBKDF2-HMAC-SHA256 (100,000 iterations).
-- verify_password(password, stored_hash, stored_salt): Cryptographic verification.
+app/core/config.py            APP_VERSION, BASE_DIR/DATA_DIR (env
+                              DESKAPP_DATA_DIR, ProgramData fallback), paths,
+                              roles, stages, entry types, disciplines
+app/core/auth.py              hash_password, verify_password (constant time),
+                              needs_rehash, generate_password
+app/core/settings.py          app_settings(name): QSettings (registry or INI
+                              via DESKAPP_SETTINGS_DIR)
 
 app/database/db_manager.py
-Class: DBManager
-- get_connection(): Context manager yielding connection and auto-closing in finally.
-- init_db(standalone): Schema creation and auto-migrations.
-- seed_disciplines(): Idempotent default disciplines seed.
-- seed_defaults(standalone): Seeds admin, coo, superadmin, and test accounts.
-- seed_heads_from_file(json_path): Parses seed_heads.json with placeholder skip.
-- backup_database(max_copies=30): Daily SQLite backup with 30-day retention.
-- Disciplines API: get_disciplines, add_discipline, update_discipline, toggle_hide_discipline.
-- Users API: get_user, get_users, create_user (role-enforced), update_user, reset_user_password, change_password.
-- Projects API: get_projects, add_project, toggle_hide_project.
-- Tasks API: get_tasks (discipline-filtered), add_task, update_task_dates, toggle_hide_task, generate_next_task_id.
-- Proposals API: create_task_proposal, approve_task_proposal, reject_task_proposal, get_task_proposals.
-- Date Changes API: create_task_date_change_request, approve_task_date_change_request, reject_task_date_change_request, get_task_date_change_requests.
-- Progress Logs API: submit_progress_log (discipline-enforced, idempotent), get_next_revision_number, get_progress_logs.
-- Priority Notifications API: create_priority_notification, respond_priority_notification, get_priority_notifications.
-- Analytics API: get_analytics_data.
+  helpers                     now_local, parse_date, check_date_order,
+                              clean_text
+  DBManager                   get_connection, transaction, init_db, _migrate,
+                              seeding/bootstrap, emergency_reset_superadmin,
+                              backup_database, list_backups, check_integrity,
+                              users/auth/sessions, settings + system info,
+                              projects/tasks (incl. soft delete), proposals,
+                              date changes, progress logs, notifications,
+                              get_analytics_data, get_project_timeline_data
+  ClientQueueDBManager        enqueue, get_items, count, delete_item,
+                              mark_attempt, mark_failed, retry_item
 
-Class: ClientQueueDBManager
-- get_connection(): Context manager for local SQLite database.
-- init_db(): Creates offline_queue table.
-- add_to_queue(event_type, payload_json): Persists queued action.
-- get_all_queued(): Returns pending actions in FIFO order.
-- delete_queued(queue_id): Purges single item.
-- delete_queued_by_payload_id(event_type, item_id): Purges item upon server ACK.
-- clear_queue(): Purges all items.
+app/network/protocol.py       PROTOCOL_VERSION, frame limits, error codes
+app/network/server.py         Session, @action registry, CentralWebSocketServer
+                              (handle_message dispatcher, db_call, broadcast,
+                              notify_changed, start_background/start/stop,
+                              one a_* handler per action)
+app/network/client.py         ServerError, OfflineError, deliver, run_async,
+                              NetworkClient (login, session loop with RESUME,
+                              request/call, export_excel, change_password,
+                              logout/close, event signals)
 
-app/network/client.py
-Class: NetworkClient
-- Signals: connection_status_changed, initial_snapshot_received, priority_alert_received,
-  log_event_received, notification_response_received, task_proposal_event,
-  task_date_change_event, global_refresh_received, ack_received, response_received.
-- start(): Persistent connection loop with 3s auto-reconnect.
-- send_action(action, payload, msg_id): Thread-safe queueing to server.
-- request_async(action, payload, timeout): Async request-response future.
-- authenticate_server(server_ip, port, user_id, password): Standalone login verification.
-- change_password_server(server_ip, port, user_id, new_pass, old_pass, force): Server password change.
+app/services/sync_service.py  SyncService (Head outbox: submit, flush,
+                              retry/discard failed, counts, signals)
+app/services/excel_service.py ExcelExportService.export_logs_to_excel,
+                              build_rows; HEADERS
+app/services/maintenance.py   BackupScheduler, restore_database, setup_logging
 
-app/network/server.py
-Class: CentralWebSocketServer
-- register(ws), unregister(ws), broadcast(msg, target_roles), send_to_user(uid, msg).
-- handle_message(ws, raw): Dispatches LOGIN, CHANGE_PASSWORD, IDENTIFY, SUBMIT_LOG,
-  CALCULATE_NEXT_REVISION, GENERATE_NEXT_TASK_ID, PROPOSE_TASK, APPROVE_TASK_PROPOSAL,
-  REJECT_TASK_PROPOSAL, REQUEST_TASK_DATE_CHANGE, APPROVE_DATE_CHANGE, REJECT_DATE_CHANGE,
-  COO_NOTIFY, RESPOND_NOTIFICATION, GET_DISCIPLINES, ADD_DISCIPLINE, TOGGLE_HIDE_DISCIPLINE,
-  GET_USERS, CREATE_USER, UPDATE_USER, RESET_PASSWORD, GET_PROJECTS, ADD_PROJECT,
-  TOGGLE_HIDE_PROJECT, GET_TASKS, ADD_TASK, UPDATE_TASK_DATES, TOGGLE_HIDE_TASK,
-  GET_ANALYTICS, EXPORT_EXCEL_REQUEST, GET_RECENT_LOGS.
-- send_initial_snapshot(ws, user_id, role, discipline_id): Delivers filtered state.
-
-app/services/sync_service.py
-Class: SyncService
-- submit_progress_log(payload): Pre-generates UUID, saves locally, transmits online.
-- respond_priority_notification(payload), propose_task(payload), request_date_change(payload).
-- on_ack_received(ack): Purges queued items upon server ACK.
-- flush_offline_queue(): Retransmits queued items upon reconnection.
-
-app/services/excel_service.py
-Class: ExcelExportService
-- export_logs_to_excel(output_path, project_id, discipline_id, employee_id, start_date, end_date):
-  Generates styled multi-sheet workbook with discipline categorization.
-
-app/ui/components.py
-- ToastNotifier: Inline auto-dismissing toast banner.
-- SyncStatusBadge: Live connectivity and queue count badge.
-- BlockingCenterModal: Non-dismissible priority alert modal.
-- CopyrightFooter: Global attribution footer.
-- CollapsiblePanel: Resizable panel wrapper with collapse chevron toggle.
-
-app/ui/styles.py
-- DARK_THEME_QSS: Design system stylesheet (Zinc #18181B / #27272A, Purple #7C3AED, Splitter hover).
-
-app/ui/login_dialog.py
-- PasswordChangeDialog: Forced password reset dialog communicating over WebSocket.
-- LoginDialog: Server-authenticated login interface with IP memory via QSettings.
-
-app/ui/head_workspace.py
-- TaskProposalDialog: Propose task auto-tagged with Head discipline.
-- DateChangeRequestDialog: Submit date change request with mandatory justification.
-- HeadWorkspace: Workstation with discipline tabs, date change requests, Assigned To autocomplete,
-  and resizable QSplitters.
-
-app/ui/admin_workspace.py
-- AdminWorkspace: Discipline task tabs, date change request reviews, user management,
-  export dialog, and resizable QSplitters.
-
-app/ui/coo_workspace.py
-- CooWorkspace: Real-time progress submissions with Assigned To column, priority alert
-  dispatcher, response tracker, and resizable QSplitters.
-
-app/ui/superadmin_workspace.py
-- SuperAdminWorkspace: Master account administration, role permissions, embedded Admin
-  and COO dashboards, and resizable QSplitters.
+app/ui/components.py          ToastOverlay/ToastNotifier, ConnectionBanner,
+                              SyncStatusBadge, BlockingCenterModal, RoleWindow,
+                              ChangeDebouncer, BusyButton, CollapsiblePanel,
+                              KpiMetricCard, table helpers, describe_error
+app/ui/login_dialog.py        LoginDialog, PasswordChangeDialog
+app/ui/head_workspace.py      HeadWorkspace, TaskProposalDialog,
+                              DateChangeRequestDialog, FailedSubmissionsDialog
+app/ui/admin_workspace.py     AdminPanel, AdminWorkspace
+app/ui/coo_workspace.py       CooPanel, CooWorkspace
+app/ui/superadmin_workspace.py SuperAdminPanel, SuperAdminWorkspace,
+                              EditAccountDialog
+app/ui/export_panel.py        ExportPanel, ExportDialog, save_excel_report
+app/ui/timeline_widget.py     ProjectProgressiveTimelineWidget, TimelineCanvas
+app/ui/styles.py              DARK_THEME_QSS (Zinc/Purple)
 
 ================================================================================
-6. DEVELOPER CHEAT SHEET: EXTENDING & MODIFYING FEATURES
+7. TESTING AND BUILDING
 ================================================================================
-
-1. Adding a Database Column:
-   In DBManager.init_db(), check PRAGMA table_info(table_name).
-   If column is missing, run ALTER TABLE table_name ADD COLUMN col_name TYPE.
-
-2. Adding a New WebSocket Action:
-   - Server: Add branch in CentralWebSocketServer.handle_message().
-   - Client: Use net_client.send_action("ACTION", payload). Handle response in
-     response_received signal.
-
-3. Adding a New Discipline:
-   Add to DEFAULT_DISCIPLINES in config.py, or use Admin "Disciplines Management" tab.
-
-4. Testing Changes:
-   Run automated test suite:
-   python -m pytest
-
-================================================================================
-7. TESTING & BUILD INSTRUCTIONS
-================================================================================
-
-A. Run Test Suite:
-   python -m pytest
-
-B. Run Locally from Source:
-   - Central Server Daemon:
-     python main.py --server-only --port 8765
-   - Workstation GUI Client:
-     python main.py
-   - Single-PC Standalone Testing:
-     python main.py --standalone
-
-C. Build Executable with PyInstaller:
-   pyinstaller DeskApp.spec --noconfirm
-   Executable generated at: dist/DeskApp/DeskApp.exe
-   Batch scripts:
-   - Launch_Server_Daemon.bat -> Launches server daemon mode.
-   - Launch_DeskApp.bat       -> Launches workstation GUI client.
-================================================================================
+  python -m pytest -q    81 tests. Tests use temporary data folders and INI
+                         settings, so they never touch data/ or the registry.
+    test_protocol.py         every audit attack replayed; permission matrix
+    test_sync_integration.py server + 2 clients, link cut/restored: no loss,
+                             no duplicates, rejected items surfaced
+    test_gui_smoke.py        headless run through all four roles
+    test_migrations.py       old schemas + copies of real DBs, run twice
+    test_data_integrity.py   revisions, approvals, soft delete, validation
+    test_reports.py          Excel content/filters, analytics, timeline, speed
+    test_maintenance.py      backup schedule/retention, restore, logging
+    test_app.py, test_ui_static.py
+  python -m PyInstaller DeskApp.spec --noconfirm
+    -> dist/DeskApp/DeskApp.exe (client), DeskAppServer.exe (server console),
+       Launch_DeskApp.bat, Launch_Server_Daemon.bat, DEPLOYMENT.md,
+       seed_heads.example.json

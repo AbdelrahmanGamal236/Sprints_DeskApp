@@ -2,6 +2,52 @@
 
 Finding IDs (F-xx) refer to `AUDIT_REPORT.md`.
 
+## M6: Hardening, backups, logging, packaging, deployment
+
+### Backups and recovery
+- **Daily backups while the server runs.** One is made at startup if none exists for today, then one every day at the Super Admin's backup time (default 02:00). Copies use SQLite's online backup API, so they are safe while people work. Each copy is integrity-checked, and a bad copy is discarded. Each backup is a single file named `central_app_YYYYMMDD_HHMMSS.db`, and the newest N are kept (setting). Older-style backup files are never deleted. (F-18)
+- **`--restore <file>`** puts a backup back in place:
+  - It refuses while the server is running and refuses damaged files.
+  - It asks you to type YES (`--yes` skips that).
+  - It first saves the current database as `central_app_pre_restore_*.db`.
+- **`--reset-superadmin`** is a recovery command used while the server is stopped. It gives `superadmin` a new one-time password.
+- Each database keeps its backups in a `backups` folder next to itself.
+
+### Logging
+- Rotating log files (5 x 5 MB): `data/logs/server.log` and `data/logs/client.log`. Unhandled errors are written to them. The noisy websockets library logs only warnings. (F-33)
+
+### Packaging
+- `DeskApp.spec` builds two programs in one folder:
+  - **`DeskApp.exe`**: the client, with no console window
+  - **`DeskAppServer.exe`**: the server, with a console window that shows status and the first-run password (F-19)
+- The server program doesn't load Qt.
+- numpy and other unused libraries are excluded, shrinking the build from 240 MB to 122 MB. (F-30)
+- The build folder also contains `Launch_DeskApp.bat`, `Launch_Server_Daemon.bat`, `DEPLOYMENT.md` and `seed_heads.example.json`.
+- Both launchers use absolute paths (`%~dp0`), so they work wherever the folder is copied, and also on PCs where Windows doesn't run programs from the current folder.
+- **Data folder:** `data` next to the program. `--data-dir` overrides it. If that folder isn't writable (for example under Program Files), `%PROGRAMDATA%\DeskApp\data` is used.
+- The version (2.0.0) appears in the login window title, the server log and System Settings. `--version` prints it.
+
+### Removed
+- `rebuild_db.py`. It deleted the live database and filled it with demo data. Use `--standalone` for a demo. (F-32)
+
+### Documentation
+- New: `DEPLOYMENT.md` (for IT), `CLAUDE.md` (for developers).
+- Rewritten: `README.md` and `APPLICATION_WORKFLOW_SUMMARY.txt`, to match the code.
+- `AUDIT_REPORT.md` Section 8 lists the status of every finding. (F-35)
+
+### Verified on the frozen build, from a clean copy of `dist/DeskApp`
+- `Launch_Server_Daemon.bat`: the console shows the one-time password, the Heads are seeded, migrations and a backup run, the log file is written, and the Super Admin logs in.
+- `Launch_DeskApp.bat`: the client starts and writes its log.
+- `--restore`, cancelling the restore, `--reset-superadmin` and `--version` all work.
+
+### Tests
+- `tests/test_maintenance.py` covers:
+  - the backup schedule, using a simulated clock
+  - integrity checks and retention
+  - restore, including refusing while the server runs
+  - the emergency reset
+  - the log file
+
 ## M5: UI/UX polish
 
 ### Notifications
