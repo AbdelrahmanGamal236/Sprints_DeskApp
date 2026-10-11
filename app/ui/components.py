@@ -1,9 +1,10 @@
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtWidgets import (
-    QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, 
+    QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QFrame, QWidget, QApplication, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QSplitter
+    QHeaderView, QAbstractItemView, QSplitter, QMainWindow, QMessageBox
 )
+
 
 class ToastNotifier(QFrame):
     """Inline / Toast style confirmation message box."""
@@ -161,6 +162,88 @@ class CopyrightFooter(QLabel):
         super().__init__("© All Rights Reserved to Eng. Abdelrahman Gamal & Eng. Tolimy", parent)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("font-size: 11px; color: #64748B; padding: 6px; font-weight: 500;")
+
+
+class ChangeDebouncer(QObject):
+    """Collects DATA_CHANGED scopes for a short moment and reloads once (avoids reload storms)."""
+    def __init__(self, callback, delay_ms: int = 250, parent=None):
+        super().__init__(parent)
+        self._callback = callback
+        self._scopes = set()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(delay_ms)
+        self._timer.timeout.connect(self._fire)
+
+    def add(self, scopes):
+        self._scopes.update(scopes)
+        self._timer.start()
+
+    def _fire(self):
+        scopes, self._scopes = self._scopes, set()
+        if scopes:
+            self._callback(scopes)
+
+
+class RoleWindow(QMainWindow):
+    """
+    Top-level window for one role: header with the user's name, Logout button, a content panel and the
+    footer. The panel may implement restore_layout()/save_layout() to persist splitter sizes per user.
+    """
+    def __init__(self, window_title: str, header_text: str, panel: QWidget, min_size=(1050, 750)):
+        super().__init__()
+        self.panel = panel
+        self.logout_requested = False
+        self.setWindowTitle(window_title)
+        self.setMinimumSize(*min_size)
+
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        top_bar = QHBoxLayout()
+        header = QLabel(header_text, self)
+        header.setObjectName("HeaderTitle")
+        top_bar.addWidget(header)
+        top_bar.addStretch()
+        btn_logout = QPushButton("Logout", self)
+        btn_logout.setObjectName("DangerButton")
+        btn_logout.clicked.connect(self.on_logout)
+        top_bar.addWidget(btn_logout)
+        layout.addLayout(top_bar)
+
+        layout.addWidget(panel, 1)
+        layout.addWidget(CopyrightFooter(self))
+        self._layout_restored = False
+
+    def on_logout(self):
+        confirm = QMessageBox.question(self, "Confirm Logout", "Are you sure you want to log out?",
+                                       QMessageBox.Yes | QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            self.logout_requested = True
+            self.close()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._layout_restored and hasattr(self.panel, "restore_layout"):
+            self._layout_restored = True
+            self.panel.restore_layout()
+
+    def closeEvent(self, event):
+        if hasattr(self.panel, "save_layout"):
+            self.panel.save_layout()
+        super().closeEvent(event)
+
+
+def restore_splitter(splitter: QSplitter, settings, key: str, default_sizes: list):
+    saved = settings.value(key)
+    try:
+        sizes = [int(x) for x in saved] if saved else default_sizes
+    except (TypeError, ValueError):
+        sizes = default_sizes
+    splitter.setSizes(sizes)
 
 
 # =========================================================================

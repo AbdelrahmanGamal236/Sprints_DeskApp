@@ -11,17 +11,19 @@ from app.core.config import ROLE_HEAD, ROLE_COO, ROLE_ADMIN, ROLE_SUPER_ADMIN
 from app.network.client import NetworkClient, run_async
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_action_cell, create_table_item, KpiMetricCard, describe_error
+    setup_modern_table, create_table_action_cell, create_table_item, KpiMetricCard, describe_error,
+    ChangeDebouncer, RoleWindow, restore_splitter
 )
 from app.ui.timeline_widget import ProjectProgressiveTimelineWidget
 
-class AdminWorkspace(QMainWindow):
-    """Admin Management Workspace with Discipline Organization & Server Enforcement."""
-    def __init__(self, user_dict: dict, net_client: NetworkClient):
-        super().__init__()
+class AdminPanel(QWidget):
+    """All Admin tools. Shown in AdminWorkspace and embedded in the Super Admin console."""
+    ALL_SCOPES = {"disciplines", "projects", "tasks", "users", "proposals", "date_changes", "analytics"}
+
+    def __init__(self, user_dict: dict, net_client: NetworkClient, parent=None):
+        super().__init__(parent)
         self.user = user_dict
         self.net_client = net_client
-        self.logout_requested = False
 
         self.disciplines_data = []
         self.projects_data = []
@@ -30,27 +32,9 @@ class AdminWorkspace(QMainWindow):
         self.pending_proposals_data = []
         self.pending_date_changes_data = []
 
-        self.setWindowTitle(f"Admin Workspace - {self.user.get('full_name', self.user['user_id'])}")
-        self.setMinimumSize(1050, 750)
-
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(10)
-
-        # Header
-        top_bar = QHBoxLayout()
-        header = QLabel(f"Admin Control Center - {self.user.get('full_name') or self.user['user_id']}", self)
-        header.setObjectName("HeaderTitle")
-        top_bar.addWidget(header)
-        top_bar.addStretch()
-
-        btn_logout = QPushButton("Logout", self)
-        btn_logout.setObjectName("DangerButton")
-        btn_logout.clicked.connect(self.on_logout)
-        top_bar.addWidget(btn_logout)
-        main_layout.addLayout(top_bar)
 
         self.toast = ToastNotifier(self)
         main_layout.addWidget(self.toast)
@@ -65,29 +49,40 @@ class AdminWorkspace(QMainWindow):
         self.tabs.addTab(self.create_export_tab(), "Excel Reports")
         main_layout.addWidget(self.tabs)
 
-        main_layout.addWidget(CopyrightFooter(self))
-
-        # Network bindings
+        # Network bindings: reload only what changed on the server
+        self._changes = ChangeDebouncer(self.reload_scopes, parent=self)
         self.net_client.task_proposal_event.connect(self.on_task_proposal_event)
         self.net_client.task_date_change_event.connect(self.on_task_date_change_event)
-        self.net_client.global_refresh_received.connect(self.reload_all_data)
+        self.net_client.data_changed.connect(self._changes.add)
+        self.net_client.log_event_received.connect(lambda _d: self._changes.add({"analytics"}))
         self.net_client.connection_status_changed.connect(lambda ok, _msg: ok and self.reload_all_data())
 
         self.reload_all_data()
 
     # ------------------- DATA RELOAD VIA SERVER (B2) -------------------
     def reload_all_data(self):
+        self.reload_scopes(self.ALL_SCOPES)
+
+    def reload_scopes(self, scopes):
         if not self.net_client.is_connected:
             return
+        scopes = set(scopes)
         call = self.net_client.call
-        call("GET_DISCIPLINES", {"include_hidden": True}, self._on_disciplines, self.on_request_error)
-        call("GET_PROJECTS", {"include_hidden": True}, self._on_projects, self.on_request_error)
-        call("GET_TASKS", {"include_hidden": True}, self._on_tasks, self.on_request_error)
-        call("GET_USERS", {}, self._on_users, self.on_request_error)
-        call("GET_TASK_PROPOSALS", {}, lambda r: self.update_proposals_views(r.get("proposals", [])), self.on_request_error)
-        call("GET_DATE_CHANGE_REQUESTS", {}, lambda r: self.update_date_change_views(r.get("requests", [])), self.on_request_error)
-        call("GET_ANALYTICS", {}, lambda r: self.update_analytics_views(r.get("data", {})), self.on_request_error)
-        self.on_timeline_project_selected()
+        if "disciplines" in scopes:
+            call("GET_DISCIPLINES", {"include_hidden": True}, self._on_disciplines, self.on_request_error)
+        if "projects" in scopes:
+            call("GET_PROJECTS", {"include_hidden": True}, self._on_projects, self.on_request_error)
+        if "tasks" in scopes:
+            call("GET_TASKS", {"include_hidden": True}, self._on_tasks, self.on_request_error)
+            self.on_timeline_project_selected()
+        if "users" in scopes:
+            call("GET_USERS", {}, self._on_users, self.on_request_error)
+        if "proposals" in scopes:
+            call("GET_TASK_PROPOSALS", {}, lambda r: self.update_proposals_views(r.get("proposals", [])), self.on_request_error)
+        if "date_changes" in scopes:
+            call("GET_DATE_CHANGE_REQUESTS", {}, lambda r: self.update_date_change_views(r.get("requests", [])), self.on_request_error)
+        if scopes & {"analytics", "tasks", "projects", "users"}:
+            call("GET_ANALYTICS", {}, lambda r: self.update_analytics_views(r.get("data", {})), self.on_request_error)
 
     def _on_disciplines(self, r):
         self.disciplines_data = r.get("disciplines", [])
@@ -1215,53 +1210,31 @@ class AdminWorkspace(QMainWindow):
         prop = data.get("proposal", {})
         if data.get("type") == "NEW_TASK_PROPOSAL_EVENT":
             self.toast.show_message(f"New task request from {prop.get('proposed_by_id')}: '{prop.get('task_name')}'.")
-        self.reload_all_data()
 
     def on_task_date_change_event(self, data: dict):
         if data.get("event") == "CREATED":
             self.toast.show_message(f"New date change request for task {data.get('request', {}).get('task_id')}.")
-        self.reload_all_data()
 
-    def on_logout(self):
-        confirm = QMessageBox.question(
-            self, "Confirm Logout", "Are you sure you want to log out?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if confirm == QMessageBox.Yes:
-            self.logout_requested = True
-            self.close()
-
-    def showEvent(self, event):
-        super().showEvent(event)
+    def restore_layout(self):
         w = max(self.width(), 1050)
-        sidebar_w = int(w * 0.382)
-        content_w = int(w * 0.618)
+        defaults = [int(w * 0.382), int(w * 0.618)]
         settings = app_settings("AdminWorkspace")
-        emp_sizes = settings.value("emp_splitter_sizes")
-        if emp_sizes and hasattr(self, "emp_splitter"):
-            try:
-                self.emp_splitter.setSizes([int(x) for x in emp_sizes])
-            except Exception:
-                self.emp_splitter.setSizes([sidebar_w, content_w])
-        elif hasattr(self, "emp_splitter"):
-            self.emp_splitter.setSizes([sidebar_w, content_w])
+        uid = self.user["user_id"]
+        restore_splitter(self.emp_splitter, settings, f"{uid}/emp_splitter_sizes", defaults)
+        restore_splitter(self.prj_splitter, settings, f"{uid}/prj_splitter_sizes", defaults)
 
-        prj_sizes = settings.value("prj_splitter_sizes")
-        if prj_sizes and hasattr(self, "prj_splitter"):
-            try:
-                self.prj_splitter.setSizes([int(x) for x in prj_sizes])
-            except Exception:
-                self.prj_splitter.setSizes([sidebar_w, content_w])
-        elif hasattr(self, "prj_splitter"):
-            self.prj_splitter.setSizes([sidebar_w, content_w])
-
-    def closeEvent(self, event):
+    def save_layout(self):
         settings = app_settings("AdminWorkspace")
-        if hasattr(self, "emp_splitter"):
-            settings.setValue("emp_splitter_sizes", self.emp_splitter.sizes())
-        if hasattr(self, "prj_splitter"):
-            settings.setValue("prj_splitter_sizes", self.prj_splitter.sizes())
-        super().closeEvent(event)
+        uid = self.user["user_id"]
+        settings.setValue(f"{uid}/emp_splitter_sizes", self.emp_splitter.sizes())
+        settings.setValue(f"{uid}/prj_splitter_sizes", self.prj_splitter.sizes())
+
+
+class AdminWorkspace(RoleWindow):
+    def __init__(self, user_dict: dict, net_client: NetworkClient):
+        name = user_dict.get("full_name") or user_dict["user_id"]
+        super().__init__(f"Admin Workspace - {name}", f"Admin Control Center - {name}",
+                         AdminPanel(user_dict, net_client))
 
 
 def save_excel_report(parent, raw_bytes: bytes, default_name: str):

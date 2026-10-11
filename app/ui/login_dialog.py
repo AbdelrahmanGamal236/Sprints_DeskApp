@@ -18,6 +18,7 @@ class PasswordChangeDialog(QDialog):
         super().__init__(parent)
         self.user_id = user_id
         self.net_client = net_client
+        self.min_length = int((net_client.policy or {}).get("password_min_length", PASSWORD_MIN_LENGTH))
         self.setWindowTitle("Mandatory Password Update")
         self.setMinimumWidth(380)
         self.setModal(True)
@@ -30,7 +31,7 @@ class PasswordChangeDialog(QDialog):
         layout.addWidget(header)
 
         info = QLabel(f"Welcome, User '{user_id}'. You must choose a new password before continuing "
-                      f"(at least {PASSWORD_MIN_LENGTH} characters, not your User ID).", self)
+                      f"(at least {self.min_length} characters, not your User ID).", self)
         info.setWordWrap(True)
         info.setStyleSheet("color: #94A3B8; font-size: 12px;")
         layout.addWidget(info)
@@ -60,8 +61,8 @@ class PasswordChangeDialog(QDialog):
         new_pwd = self.txt_new.text()
         confirm_pwd = self.txt_confirm.text()
 
-        if len(new_pwd) < PASSWORD_MIN_LENGTH:
-            QMessageBox.warning(self, "Validation Error", f"Password must be at least {PASSWORD_MIN_LENGTH} characters.")
+        if len(new_pwd) < self.min_length:
+            QMessageBox.warning(self, "Validation Error", f"Password must be at least {self.min_length} characters.")
             return
         if new_pwd == self.user_id:
             QMessageBox.warning(self, "Validation Error", "New password cannot be the same as your User ID.")

@@ -295,6 +295,16 @@ class HeadWorkspace(QMainWindow):
         self.toast = ToastNotifier(self)
         main_layout.addWidget(self.toast)
 
+        # Project selector on top; everything below shows the selected project
+        prj_row = QHBoxLayout()
+        prj_row.addWidget(QLabel("Project:", objectName="FieldLabel"))
+        self.cmb_projects = QComboBox(self)
+        self.cmb_projects.setMinimumWidth(320)
+        self.cmb_projects.currentIndexChanged.connect(self.on_project_selected)
+        prj_row.addWidget(self.cmb_projects)
+        prj_row.addStretch()
+        main_layout.addLayout(prj_row)
+
         # Tabs: Daily Progress Logging, Audit Timeline & Progressive Timeline
         self.main_tabs = QTabWidget(self)
         self.main_tabs.addTab(self.create_logging_tab(), "Daily Progress Logging")
@@ -309,7 +319,7 @@ class HeadWorkspace(QMainWindow):
         self.net_client.priority_alert_received.connect(self.on_priority_alert)
         self.net_client.task_proposal_event.connect(self.on_task_proposal_event)
         self.net_client.task_date_change_event.connect(self.on_task_date_change_event)
-        self.net_client.global_refresh_received.connect(self.request_refresh_from_server)
+        self.net_client.data_changed.connect(self.on_data_changed)
         self.sync_service.item_synced.connect(self.on_item_synced)
         self.sync_service.item_failed.connect(self.on_item_failed)
         self.sync_service.queue_changed.connect(lambda p, f: self.update_sync_badge())
@@ -332,14 +342,6 @@ class HeadWorkspace(QMainWindow):
         left_vbox = QVBoxLayout(left_content)
         left_vbox.setContentsMargins(0, 0, 0, 0)
         left_vbox.setSpacing(10)
-
-        # Project selector
-        left_vbox.addWidget(QLabel("1. Select Project:", objectName="FieldLabel"))
-        self.lst_projects = QListWidget()
-        self.lst_projects.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.lst_projects.itemSelectionChanged.connect(self.on_project_selected)
-        self.lst_projects.setMaximumHeight(130)
-        left_vbox.addWidget(self.lst_projects)
 
         # Discipline banner if no discipline
         self.lbl_disc_warning = QLabel("Contact Admin to assign your discipline.", objectName="FieldLabel")
@@ -507,10 +509,24 @@ class HeadWorkspace(QMainWindow):
     def on_request_error(self, exc):
         self.toast.show_message(describe_error(exc), is_error=True)
 
+    def on_data_changed(self, scopes: list):
+        """Reload only what the server says changed."""
+        if not self.net_client.is_connected:
+            return
+        scopes = set(scopes)
+        if scopes & {"projects", "tasks", "disciplines", "users"}:
+            self.net_client.call("GET_SNAPSHOT", {}, self.on_initial_snapshot, self.on_request_error)
+        if "proposals" in scopes:
+            self.net_client.call("GET_TASK_PROPOSALS", {},
+                                 lambda r: self.populate_proposals_timeline(r.get("proposals", [])), self.on_request_error)
+        if "date_changes" in scopes:
+            self.net_client.call("GET_DATE_CHANGE_REQUESTS", {},
+                                 lambda r: self.populate_date_change_timeline(r.get("requests", [])), self.on_request_error)
+
     def on_initial_snapshot(self, snapshot: dict):
         self.projects_data = snapshot.get("projects", [])
         self.tasks_data = snapshot.get("tasks", [])
-        selected = self.lst_projects.currentItem().data(Qt.UserRole) if self.lst_projects.currentItem() else None
+        selected = self.cmb_projects.currentData()
         selected_task = self.lst_tasks.currentItem().data(Qt.UserRole) if self.lst_tasks.currentItem() else None
         self.populate_project_list(selected)
         if selected_task:
@@ -524,18 +540,14 @@ class HeadWorkspace(QMainWindow):
             self.on_priority_alert({"notification": notif})
 
     def populate_project_list(self, keep_project_id: str = None):
-        self.lst_projects.blockSignals(True)
-        self.lst_projects.clear()
-        row_to_select = 0
-        for idx, p in enumerate(self.projects_data):
-            item = QListWidgetItem(f"{p['name']} ({p['project_id']})")
-            item.setData(Qt.UserRole, p["project_id"])
-            self.lst_projects.addItem(item)
-            if p["project_id"] == keep_project_id:
-                row_to_select = idx
-        self.lst_projects.blockSignals(False)
-        if self.lst_projects.count() > 0:
-            self.lst_projects.setCurrentRow(row_to_select)
+        self.cmb_projects.blockSignals(True)
+        self.cmb_projects.clear()
+        for p in self.projects_data:
+            self.cmb_projects.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
+        idx = self.cmb_projects.findData(keep_project_id)
+        if self.cmb_projects.count() > 0:
+            self.cmb_projects.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_projects.blockSignals(False)
         self.on_project_selected()
 
     def create_project_timeline_tab(self) -> QWidget:
@@ -546,14 +558,14 @@ class HeadWorkspace(QMainWindow):
         layout.addWidget(self.proj_timeline_widget)
         return widget
 
-    def on_project_selected(self):
-        selected_items = self.lst_projects.selectedItems()
-        if not selected_items:
+    def on_project_selected(self, *_):
+        p_id = self.cmb_projects.currentData()
+        if not p_id:
             self.lst_tasks.clear()
+            self.disc_tabs.setTabText(0, f"{self.discipline_id or 'Unassigned'} (0)")
             if hasattr(self, "proj_timeline_widget"):
                 self.proj_timeline_widget.load_timeline_data({})
             return
-        p_id = selected_items[0].data(Qt.UserRole)
 
         self.lst_tasks.clear()
         count = 0
@@ -722,7 +734,6 @@ class HeadWorkspace(QMainWindow):
             elif st == "REJECTED":
                 reason = prop.get("rejection_reason", "No reason provided")
                 self.toast.show_message(f"Admin REJECTED task proposal '{name}': {reason}", is_warning=True)
-        self.request_refresh_from_server()
 
     def on_task_date_change_event(self, data: dict):
         req = data.get("request", {})
@@ -734,7 +745,6 @@ class HeadWorkspace(QMainWindow):
             elif st == "REJECTED":
                 reason = req.get("rejection_reason", "No reason provided")
                 self.toast.show_message(f"Admin REJECTED schedule change for task '{t_id}': {reason}", is_warning=True)
-        self.request_refresh_from_server()
 
     def on_priority_alert(self, data: dict):
         notif = data.get("notification", {})

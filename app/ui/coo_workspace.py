@@ -9,43 +9,28 @@ from app.core.settings import app_settings
 from app.network.client import NetworkClient, run_async
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_item, describe_error
+    setup_modern_table, create_table_item, describe_error, RoleWindow, restore_splitter
 )
 
-class CooWorkspace(QMainWindow):
-    """COO Live Monitoring & Priority Dispatch Workspace with Resizable Splitters (A5, A6, B2)."""
-    def __init__(self, user_dict: dict, net_client: NetworkClient):
-        super().__init__()
+class CooPanel(QWidget):
+    """COO live feed, priority alerts and export. Shown in CooWorkspace and in the Super Admin console."""
+    def __init__(self, user_dict: dict, net_client: NetworkClient, parent=None):
+        super().__init__(parent)
         self.user = user_dict
         self.net_client = net_client
-        self.logout_requested = False
 
         self.users_data = []
 
-        self.setWindowTitle(f"COO Oversight Workspace - {self.user.get('full_name') or self.user['user_id']}")
-        self.setMinimumSize(1050, 750)
-
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(12, 12, 12, 12)
+        central_widget = self
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(10)
 
-        # Top Bar
         top_bar = QHBoxLayout()
-        header = QLabel(f"COO Executive Oversight Dashboard - {self.user.get('full_name') or self.user['user_id']}", self)
-        header.setObjectName("HeaderTitle")
-        top_bar.addWidget(header)
         top_bar.addStretch()
-
         self.btn_export = QPushButton("Export Categorized Report", self)
         self.btn_export.clicked.connect(self.on_export_excel)
         top_bar.addWidget(self.btn_export)
-
-        btn_logout = QPushButton("Logout", self)
-        btn_logout.setObjectName("DangerButton")
-        btn_logout.clicked.connect(self.on_logout)
-        top_bar.addWidget(btn_logout)
         main_layout.addLayout(top_bar)
 
         self.toast = ToastNotifier(self)
@@ -130,12 +115,11 @@ class CooWorkspace(QMainWindow):
         self.main_splitter.setSizes([420, 280])
 
         main_layout.addWidget(self.main_splitter)
-        main_layout.addWidget(CopyrightFooter(self))
 
         # Network bindings
         self.net_client.log_event_received.connect(self.on_live_log_event)
         self.net_client.notification_response_received.connect(self.on_live_notif_response)
-        self.net_client.global_refresh_received.connect(self.reload_all_data)
+        self.net_client.data_changed.connect(lambda scopes: "users" in scopes and self.reload_all_data())
         self.net_client.connection_status_changed.connect(lambda ok, _msg: ok and self.reload_all_data())
 
         self.reload_all_data()
@@ -263,33 +247,17 @@ class CooWorkspace(QMainWindow):
         raw_bytes, default_name = result
         save_excel_report(self, raw_bytes, default_name)
 
-    def on_logout(self):
-        confirm = QMessageBox.question(
-            self, "Confirm Logout", "Are you sure you want to log out?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if confirm == QMessageBox.Yes:
-            self.logout_requested = True
-            self.close()
-
-    def showEvent(self, event):
-        super().showEvent(event)
+    def restore_layout(self):
         h = max(self.height(), 750)
-        top_h = int(h * 0.618)
-        bottom_h = int(h * 0.382)
-        settings = app_settings("CooWorkspace")
-        saved_sizes = settings.value("coo_main_splitter")
-        if saved_sizes and hasattr(self, "main_splitter"):
-            try:
-                self.main_splitter.setSizes([int(x) for x in saved_sizes])
-            except Exception:
-                self.main_splitter.setSizes([top_h, bottom_h])
-        elif hasattr(self, "main_splitter"):
-            self.main_splitter.setSizes([top_h, bottom_h])
+        restore_splitter(self.main_splitter, app_settings("CooWorkspace"),
+                         f"{self.user['user_id']}/coo_main_splitter", [int(h * 0.618), int(h * 0.382)])
 
-    def closeEvent(self, event):
-        settings = app_settings("CooWorkspace")
-        if hasattr(self, "main_splitter"):
-            settings.setValue("coo_main_splitter", self.main_splitter.sizes())
-        super().closeEvent(event)
+    def save_layout(self):
+        app_settings("CooWorkspace").setValue(f"{self.user['user_id']}/coo_main_splitter", self.main_splitter.sizes())
 
+
+class CooWorkspace(RoleWindow):
+    def __init__(self, user_dict: dict, net_client: NetworkClient):
+        name = user_dict.get("full_name") or user_dict["user_id"]
+        super().__init__(f"COO Oversight Workspace - {name}", f"COO Executive Oversight Dashboard - {name}",
+                         CooPanel(user_dict, net_client))
