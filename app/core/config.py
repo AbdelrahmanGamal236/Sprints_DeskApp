@@ -12,7 +12,8 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-DATA_DIR = BASE_DIR / "data"
+# DESKAPP_DATA_DIR overrides the data folder (used by tests and multi-instance local testing)
+DATA_DIR = Path(os.environ["DESKAPP_DATA_DIR"]) if os.environ.get("DESKAPP_DATA_DIR") else BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 BACKUPS_DIR = DATA_DIR / "backups"
 BACKUPS_DIR.mkdir(parents=True, exist_ok=True)

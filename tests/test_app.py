@@ -321,6 +321,7 @@ class TestDeskAppSystem(unittest.TestCase):
             except Exception as e:
                 self.assertNotIsInstance(e, RuntimeError)
                 self.assertNotIn("cannot be called from a running event loop", str(e))
+        asyncio.run(mock_running_loop())
 
     def test_task_assigned_to_head_and_autoid(self):
         """Verify Admin task creation with assigned_head_id, auto-ID generation, and Head visibility filtering."""
@@ -367,3 +368,10 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestDataIsolation(unittest.TestCase):
+    def test_tests_never_use_real_data_dir(self):
+        """conftest.py redirects DATA_DIR away from the repo's data/ folder."""
+        from app.core import config
+        repo_data = (Path(__file__).resolve().parent.parent / "data").resolve()
+        self.assertNotEqual(config.DATA_DIR.resolve(), repo_data)
+        self.assertNotEqual(config.BACKUPS_DIR.resolve().parent, repo_data)

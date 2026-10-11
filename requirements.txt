@@ -1,0 +1,5 @@
+# Runtime dependencies (bundled by PyInstaller; target PCs need no Python and no internet)
+PySide6==6.11.2
+qasync==0.28.0
+websockets==12.0
+openpyxl==3.1.2
