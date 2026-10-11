@@ -32,7 +32,15 @@ def deliver(callback, *args):
     """
     if callback is None:
         return
-    asyncio.get_event_loop().call_soon(callback, *args)
+
+    def safe_call():
+        try:
+            callback(*args)
+        except RuntimeError as e:
+            # The widget/QObject was closed before the queued callback ran (e.g. after logout): ignore
+            if "deleted" not in str(e):
+                raise
+    asyncio.get_event_loop().call_soon(safe_call)
 
 
 def run_async(coro, on_ok=None, on_err=None):

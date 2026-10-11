@@ -7,18 +7,24 @@ import socket
 
 DEFAULT_WS_PORT = 8765  # duplicated from app.core.config so arguments can be parsed before app modules load
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Offline Progress Logging & Task Management System")
     parser.add_argument("--server-only", action="store_true", help="Run dedicated Central Server headless daemon mode")
+    parser.add_argument("--data-dir", type=str, default=None,
+                        help="Folder for the database, backups and logs (default: 'data' next to the program)")
+    parser.add_argument("--restore", type=str, metavar="BACKUP_FILE", default=None,
+                        help="Replace the central database with a backup file (stop the server first)")
+    parser.add_argument("--reset-superadmin", action="store_true",
+                        help="Recovery: give the 'superadmin' account a new one-time password (stop the server first)")
+    parser.add_argument("--yes", action="store_true", help="Do not ask for confirmation (with --restore)")
+    parser.add_argument("--version", action="store_true", help="Print the DeskApp version and exit")
     parser.add_argument("--standalone", action="store_true",
                         help="Demo: embedded server + client in one process, using a separate data_demo folder")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host address for Central Server")
     parser.add_argument("--port", type=int, default=DEFAULT_WS_PORT, help="Port for Central Server")
     parser.add_argument("--server-ip", type=str, default="127.0.0.1", help="Central Server LAN IP")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
@@ -47,9 +53,55 @@ def announce_bootstrap_credentials(server):
         logging.error("Could not write FIRST_RUN_CREDENTIALS.txt: %s", e)
 
 
+def run_restore(args) -> int:
+    """--restore: put a backup back in place of the central database (server must be stopped)."""
+    from pathlib import Path
+    from app.core.config import CENTRAL_DB_PATH, BACKUPS_DIR
+    from app.services.maintenance import restore_database
+    if is_port_in_use(args.port, "127.0.0.1"):
+        print(f"\n[ERROR] The Central Server is running (port {args.port} is in use). Stop it first, then restore.\n")
+        return 1
+    backup = Path(args.restore)
+    print(f"\nThis will REPLACE the central database:\n   {CENTRAL_DB_PATH}\nwith the backup:\n   {backup}\n"
+          f"The current database is kept as a safety copy in {BACKUPS_DIR}.")
+    if not args.yes:
+        try:
+            answer = input("Type YES to continue: ")
+        except EOFError:
+            answer = ""
+        if answer.strip() != "YES":
+            print("Restore cancelled.")
+            return 1
+    try:
+        safety = restore_database(backup, CENTRAL_DB_PATH, BACKUPS_DIR)
+    except (OSError, ValueError) as e:
+        print(f"\n[ERROR] {e}\n")
+        return 1
+    logging.info("Database restored from %s (previous database saved as %s)", backup, safety)
+    print(f"\nRestore complete. Previous database saved as:\n   {safety}\nYou can start the server again.\n")
+    return 0
+
+
+def run_reset_superadmin(args) -> int:
+    if is_port_in_use(args.port, "127.0.0.1"):
+        print(f"\n[ERROR] The Central Server is running (port {args.port} is in use). Stop it first.\n")
+        return 1
+    from app.core.config import CENTRAL_DB_PATH
+    from app.database.db_manager import DBManager
+    pwd = DBManager(central_db_path=CENTRAL_DB_PATH).emergency_reset_superadmin()
+    logging.warning("Super Admin password was reset from the command line")
+    print(f"\nUser ID: superadmin   One-time password: {pwd}\n"
+          "Log in with it and choose a new password. Start the server again first.\n")
+    return 0
+
+
 def run_server_only(args):
+    from app.core.config import APP_VERSION, LOGS_DIR, DATA_DIR
+    from app.services.maintenance import setup_logging
+    log_file = setup_logging(LOGS_DIR, "server")
     from app.network.server import CentralWebSocketServer
-    logging.info("Starting Central Server Headless Daemon on port %d...", args.port)
+    logging.info("DeskApp %s - starting Central Server on port %d (data folder: %s, log: %s)",
+                 APP_VERSION, args.port, DATA_DIR, log_file)
     if is_port_in_use(args.port, "127.0.0.1"):
         logging.error("Port %d is already in use by another process (is the server already running?).", args.port)
         sys.exit(1)
@@ -157,6 +209,10 @@ class AppController:
 
 
 def run_gui(args):
+    from app.core.config import LOGS_DIR, APP_VERSION
+    from app.services.maintenance import setup_logging
+    setup_logging(LOGS_DIR, "client")
+    logging.info("DeskApp %s client starting", APP_VERSION)
     from PySide6.QtWidgets import QApplication
     from qasync import QEventLoop
     from app.ui.styles import DARK_THEME_QSS
@@ -179,10 +235,22 @@ def run_gui(args):
         loop.run_forever()
 
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
+    if args.data_dir:
+        os.environ["DESKAPP_DATA_DIR"] = os.path.abspath(args.data_dir)
     if args.standalone and not os.environ.get("DESKAPP_DATA_DIR"):
         os.environ["DESKAPP_DEMO"] = "1"
+    if args.version:
+        from app.core.config import APP_VERSION
+        print(f"DeskApp {APP_VERSION}")
+        return
+    if args.reset_superadmin:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+        sys.exit(run_reset_superadmin(args))
+    if args.restore:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+        sys.exit(run_restore(args))
     if args.server_only:
         run_server_only(args)
     else:

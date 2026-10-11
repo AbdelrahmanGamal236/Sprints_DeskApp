@@ -103,9 +103,7 @@ class CentralWebSocketServer:
         self.sessions: dict = {}  # websocket -> Session | None
         self._failed_logins: dict = {}  # user_id -> (count, locked_until)
         self._ws_server = None
-
-        # Perform daily database backup on server start
-        self.db.backup_database()
+        self._backup_task = None
 
     # ------------------------------------------------------------------ helpers
     async def db_call(self, fn, *args, **kwargs):
@@ -237,14 +235,20 @@ class CentralWebSocketServer:
             sess = self.sessions.pop(websocket, None)
             logger.info("Client disconnected: %s (%s)", sess.user_id if sess else "-", websocket.remote_address)
 
-    async def start_background(self):
+    async def start_background(self, backups: bool = True):
         """Starts listening and returns immediately (used by tests and embedded mode)."""
         self._ws_server = await websockets.serve(self.handler, self.host, self.port, max_size=P.MAX_FRAME_BYTES)
+        if backups:
+            from app.services.maintenance import BackupScheduler
+            self.backup_scheduler = BackupScheduler(self.db, run_in_executor=self.db_call)
+            self._backup_task = asyncio.ensure_future(self.backup_scheduler.run())
         if self.port == 0:
             self.port = self._ws_server.sockets[0].getsockname()[1]
         return self._ws_server
 
     async def stop(self):
+        if self._backup_task:
+            self._backup_task.cancel()
         if self._ws_server:
             self._ws_server.close()
             await self._ws_server.wait_closed()
@@ -638,7 +642,8 @@ class CentralWebSocketServer:
         from app.database.db_manager import SYSTEM_SETTINGS
         settings = await self.db_call(self.db.get_settings)
         info = await self.db_call(self.db.get_system_info)
-        info.update({"port": self.port, "protocol": P.PROTOCOL_VERSION,
+        from app.core.config import APP_VERSION
+        info.update({"port": self.port, "protocol": P.PROTOCOL_VERSION, "version": APP_VERSION,
                      "connected_users": sorted({s.user_id for _, s in self._live_sessions()})})
         labels = {k: spec[4] for k, spec in SYSTEM_SETTINGS.items()}
         return {"settings": settings, "labels": labels, "info": info}

@@ -99,7 +99,8 @@ class LoginDialog(QDialog):
         settings = app_settings("ClientConfig")
         self.selected_server_ip = settings.value("server_ip", default_server_ip)
 
-        self.setWindowTitle("DeskApp Workstation Login")
+        from app.core.config import APP_VERSION
+        self.setWindowTitle(f"DeskApp {APP_VERSION} - Workstation Login")
         self.setFixedSize(840, 520)
 
         main_layout = QHBoxLayout(self)

@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import hashlib
 import secrets
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import contextmanager
 from app.core.config import (
-    CENTRAL_DB_PATH, CLIENT_QUEUE_DB_PATH, BACKUPS_DIR, SEED_HEADS_PATH,
+    CENTRAL_DB_PATH, CLIENT_QUEUE_DB_PATH, SEED_HEADS_PATH,
     ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN, ALL_ROLES,
     DEFAULT_DISCIPLINES, PROGRESS_STAGES, ENTRY_TYPE_NEW, ENTRY_TYPE_CONTINUATION, ENTRY_TYPE_REVISION
 )
@@ -75,6 +76,8 @@ class DBManager:
     def __init__(self, central_db_path: Path = CENTRAL_DB_PATH, standalone: bool = False):
         self.db_path = central_db_path
         self.standalone = standalone
+        # Backups live next to the database (for the real server: data/backups)
+        self.backups_dir = Path(central_db_path).parent / "backups"
         self.init_db(standalone=standalone)
 
     @contextmanager
@@ -402,6 +405,24 @@ class DBManager:
             logger.warning("Database contains %d rows with dangling references (kept as-is): %s",
                            len(orphans), sorted({r[0] for r in orphans}))
 
+    def emergency_reset_superadmin(self) -> str:
+        """
+        Recovery when no Super Admin password is known (run only while the server is stopped):
+        'superadmin' becomes a SUPER_ADMIN with a new random one-time password (forced change).
+        """
+        pwd = generate_password()
+        pwd_hash, pwd_salt = hash_password(pwd)
+        with self.transaction() as cur:
+            cur.execute("SELECT 1 FROM users WHERE user_id = 'superadmin'")
+            if cur.fetchone():
+                cur.execute("""UPDATE users SET role = ?, password_hash = ?, password_salt = ?, must_change_password = 1,
+                               discipline_id = NULL WHERE user_id = 'superadmin'""", (ROLE_SUPER_ADMIN, pwd_hash, pwd_salt))
+            else:
+                cur.execute("""INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
+                               VALUES ('superadmin', 'System Super Admin', ?, ?, ?, 1)""", (pwd_hash, pwd_salt, ROLE_SUPER_ADMIN))
+            cur.execute("DELETE FROM user_sessions WHERE user_id = 'superadmin'")
+        return pwd
+
     def bootstrap_privileged_accounts(self) -> list[tuple[str, str]]:
         """
         Production bootstrap (replaces the old admin/admin, coo/coo, superadmin/superadmin seeds):
@@ -567,29 +588,58 @@ class DBManager:
 
             conn.commit()
 
-    def backup_database(self, max_copies: int = None):
-        """Automatic daily backup of central_app.db using SQLite's backup API, keeping last 30 copies."""
+    # Automatic backups are named central_app_YYYYMMDD_HHMMSS.db; only those are ever pruned.
+    BACKUP_NAME = re.compile(r"^central_app_\d{8}_\d{6}\.db$")
+
+    def list_backups(self, folder: Path = None) -> list[Path]:
+        folder = folder or self.backups_dir
+        return sorted(p for p in folder.glob("central_app_*.db") if self.BACKUP_NAME.match(p.name))
+
+    @staticmethod
+    def check_integrity(db_file: Path) -> bool:
         try:
-            BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+            con = sqlite3.connect(f"file:{Path(db_file).as_posix()}?mode=ro", uri=True)
+            try:
+                return con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return False
+
+    def backup_database(self, max_copies: int = None, now: datetime = None, folder: Path = None):
+        """
+        Consistent copy of central_app.db via SQLite's online backup API (safe while the server runs).
+        The copy is integrity-checked; a bad copy is removed. Keeps the newest `max_copies` automatic backups
+        (Super Admin setting 'backup_retention_count'). Returns the backup path or None on failure.
+        """
+        folder = folder or self.backups_dir
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
             if max_copies is None:
                 max_copies = self.get_settings()["backup_retention_count"]
-            today_str = datetime.now().strftime("%Y%m%d")
-            backup_file = BACKUPS_DIR / f"central_app_{today_str}.db"
+            stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+            backup_file = folder / f"central_app_{stamp}.db"
 
             with self.get_connection() as src_conn:
                 dest_conn = sqlite3.connect(backup_file)
-                src_conn.backup(dest_conn)
-                dest_conn.close()
+                try:
+                    src_conn.backup(dest_conn)
+                    # A backup is a single self-contained file: no -wal/-shm side files next to it
+                    dest_conn.execute("PRAGMA journal_mode = DELETE")
+                finally:
+                    dest_conn.close()
 
-            # Prune older backups
-            backups = sorted(BACKUPS_DIR.glob("central_app_*.db"))
-            if len(backups) > max_copies:
-                for old in backups[:-max_copies]:
-                    try:
-                        old.unlink()
-                    except OSError:
-                        pass
-            logger.info(f"Daily SQLite backup completed: {backup_file}")
+            if not self.check_integrity(backup_file):
+                backup_file.unlink(missing_ok=True)
+                logger.error("Backup failed the integrity check and was discarded: %s", backup_file.name)
+                return None
+
+            for old in self.list_backups(folder)[:-max_copies]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+            logger.info("Database backup completed: %s", backup_file)
             return str(backup_file)
         except Exception as e:
             logger.error(f"Failed to backup central database: {e}")
@@ -844,9 +894,9 @@ class DBManager:
             counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
                       for t in ("users", "projects", "tasks", "progress_logs")}
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-        backups = sorted(BACKUPS_DIR.glob("central_app_*.db"))
+        backups = self.list_backups()
         return {"db_path": str(self.db_path), "schema_version": version, "counts": counts,
-                "backup_folder": str(BACKUPS_DIR), "backup_count": len(backups),
+                "backup_folder": str(self.backups_dir), "backup_count": len(backups),
                 "last_backup": backups[-1].name if backups else None}
 
     # ------------------- SESSIONS -------------------

@@ -1,6 +1,9 @@
 import sys
 import os
+import tempfile
 from pathlib import Path
+
+APP_VERSION = "2.0.0"
 
 # Compute canonical Base Directory so source code and PyInstaller bundle share the same database
 if getattr(sys, 'frozen', False):
@@ -20,7 +23,23 @@ elif os.environ.get("DESKAPP_DEMO") == "1":
     DATA_DIR = BASE_DIR / "data_demo"
 else:
     DATA_DIR = BASE_DIR / "data"
+
+
+def _writable(folder: Path) -> bool:
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=folder, prefix=".write_test_", delete=True):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+if not _writable(DATA_DIR) and not os.environ.get("DESKAPP_DATA_DIR"):
+    # e.g. installed under C:\Program Files: keep data in the machine-wide ProgramData folder instead
+    DATA_DIR = Path(os.environ.get("PROGRAMDATA", str(Path.home()))) / "DeskApp" / DATA_DIR.name
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = DATA_DIR / "logs"
 BACKUPS_DIR = DATA_DIR / "backups"
 BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 SEED_HEADS_PATH = DATA_DIR / "seed_heads.json"
