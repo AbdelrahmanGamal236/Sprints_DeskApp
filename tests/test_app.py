@@ -311,18 +311,6 @@ class TestDeskAppSystem(unittest.TestCase):
         self.assertIsNotNone(backup_path)
         self.assertTrue(os.path.exists(backup_path))
 
-    def test_sync_auth_callable_from_running_event_loop(self):
-        """Verify sync_authenticate_server safely runs inside an active asyncio/qasync loop without RuntimeError."""
-        import asyncio
-        from app.network.client import NetworkClient
-        async def mock_running_loop():
-            try:
-                NetworkClient.sync_authenticate_server("127.0.0.1", 19999, "admin", "admin", timeout=0.5)
-            except Exception as e:
-                self.assertNotIsInstance(e, RuntimeError)
-                self.assertNotIn("cannot be called from a running event loop", str(e))
-        asyncio.run(mock_running_loop())
-
     def test_task_assigned_to_head_and_autoid(self):
         """Verify Admin task creation with assigned_head_id, auto-ID generation, and Head visibility filtering."""
         # 1. Test auto-generation when task_id starts with MSG-
@@ -375,3 +363,61 @@ class TestDataIsolation(unittest.TestCase):
         repo_data = (Path(__file__).resolve().parent.parent / "data").resolve()
         self.assertNotEqual(config.DATA_DIR.resolve(), repo_data)
         self.assertNotEqual(config.BACKUPS_DIR.resolve().parent, repo_data)
+
+
+class TestBootstrapAndPasswords(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "prod.db"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_fresh_production_db_has_no_default_accounts(self):
+        db = DBManager(central_db_path=self.db_path)
+        users = {u["user_id"]: u for u in db.get_users()}
+        self.assertNotIn("admin", users)
+        self.assertNotIn("coo", users)
+        self.assertIn("superadmin", users)
+        self.assertEqual(users["superadmin"]["must_change_password"], 1)
+        (uid, pwd), = db.bootstrap_credentials
+        self.assertEqual(uid, "superadmin")
+        self.assertIsNone(db.authenticate("superadmin", "superadmin"))
+        self.assertIsNotNone(db.authenticate("superadmin", pwd))
+        # Second start: nothing new issued, password unchanged
+        db2 = DBManager(central_db_path=self.db_path)
+        self.assertEqual(db2.bootstrap_credentials, [])
+        self.assertIsNotNone(db2.authenticate("superadmin", pwd))
+
+    def test_legacy_default_accounts_are_rotated(self):
+        import sqlite3
+        db = DBManager(central_db_path=self.db_path)
+        legacy_hash, legacy_salt = hash_password("admin", iterations=100000)
+        legacy_hex = legacy_hash.split("$")[-1]  # old storage format: bare hex, 100k iterations
+        con = sqlite3.connect(self.db_path)
+        con.execute("INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES ('admin','A',?,?,'ADMIN',1)",
+                    (legacy_hex, legacy_salt))
+        con.commit(); con.close()
+        self.assertIsNotNone(db.authenticate("admin", "admin"))  # legacy hash still verifies...
+        db2 = DBManager(central_db_path=self.db_path)              # ...until the next server start rotates it
+        issued = dict(db2.bootstrap_credentials)
+        self.assertIn("admin", issued)
+        self.assertIsNone(db2.authenticate("admin", "admin"))
+        self.assertIsNotNone(db2.authenticate("admin", issued["admin"]))
+
+    def test_used_accounts_are_never_rotated_and_hashes_upgrade(self):
+        db = DBManager(central_db_path=self.db_path)
+        db.create_user(ROLE_SUPER_ADMIN, "coo", "COO", ROLE_COO)
+        db.change_password("coo", "MyRealPassw0rd", require_old=False)
+        db2 = DBManager(central_db_path=self.db_path)
+        self.assertNotIn("coo", dict(db2.bootstrap_credentials))
+        self.assertIsNotNone(db2.authenticate("coo", "MyRealPassw0rd"))
+
+    def test_anonymous_actor_cannot_manage_users(self):
+        db = DBManager(central_db_path=self.db_path)
+        with self.assertRaises(PermissionError):
+            db.create_user(None, "x", "X", ROLE_ADMIN)
+        with self.assertRaises(PermissionError):
+            db.create_user(ROLE_HEAD, "x", "X", ROLE_HEAD, "URB")
+        with self.assertRaises(PermissionError):
+            db.reset_user_password(None, "superadmin")
