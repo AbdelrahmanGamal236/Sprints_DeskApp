@@ -170,7 +170,7 @@ class TestDeskAppSystem(unittest.TestCase):
                 "project_id": "PRJ-01",
                 "task_id": "TSK-MEC",
                 "start_date": "2026-10-02",
-                "end_date": "2026-10-02"
+                "progress_stage": "In Progress", "end_date": "2026-10-02"
             })
 
         # Head with no discipline -> must raise PermissionError
@@ -180,7 +180,7 @@ class TestDeskAppSystem(unittest.TestCase):
                 "project_id": "PRJ-01",
                 "task_id": "TSK-STR",
                 "start_date": "2026-10-02",
-                "end_date": "2026-10-02"
+                "progress_stage": "In Progress", "end_date": "2026-10-02"
             })
 
         # STR head logging against STR task -> succeeds
@@ -189,7 +189,7 @@ class TestDeskAppSystem(unittest.TestCase):
             "project_id": "PRJ-01",
             "task_id": "TSK-STR",
             "start_date": "2026-10-02",
-            "end_date": "2026-10-02",
+            "progress_stage": "In Progress", "end_date": "2026-10-02",
             "assigned_to": "Worker John"
         })
         self.assertEqual(log["discipline_id"], "STR")
@@ -204,11 +204,11 @@ class TestDeskAppSystem(unittest.TestCase):
 
         self.db.submit_progress_log({
             "employee_id": "head_urb", "project_id": "PRJ-01", "task_id": "TSK-URB",
-            "start_date": "2026-10-01", "end_date": "2026-10-01", "assigned_to": "Planner Ali"
+            "start_date": "2026-10-01", "progress_stage": "In Progress", "end_date": "2026-10-01", "assigned_to": "Planner Ali"
         })
         self.db.submit_progress_log({
             "employee_id": "head_bim", "project_id": "PRJ-01", "task_id": "TSK-BIM",
-            "start_date": "2026-10-01", "end_date": "2026-10-01", "assigned_to": "Modeller Sam"
+            "start_date": "2026-10-01", "progress_stage": "In Progress", "end_date": "2026-10-01", "assigned_to": "Modeller Sam"
         })
 
         excel_service = ExcelExportService(self.db)
@@ -238,7 +238,7 @@ class TestDeskAppSystem(unittest.TestCase):
             "project_id": "PRJ-01",
             "task_id": "TSK-QC",
             "start_date": "2026-10-02",
-            "end_date": "2026-10-02",
+            "progress_stage": "In Progress", "end_date": "2026-10-02",
             "assigned_to": "Eng. Tarek"
         })
         self.assertEqual(log["assigned_to"], "Eng. Tarek")
@@ -268,7 +268,7 @@ class TestDeskAppSystem(unittest.TestCase):
             "project_id": "PRJ-01",
             "task_id": "TSK-02",
             "start_date": "2026-10-01",
-            "end_date": "2026-10-01"
+            "progress_stage": "In Progress", "end_date": "2026-10-01"
         }
         # Client enqueues before sending
         self.queue_db.add_to_queue("SUBMIT_LOG", json.dumps(payload))
@@ -313,17 +313,17 @@ class TestDeskAppSystem(unittest.TestCase):
 
     def test_task_assigned_to_head_and_autoid(self):
         """Verify Admin task creation with assigned_head_id, auto-ID generation, and Head visibility filtering."""
+        self.db.create_user(ROLE_SUPER_ADMIN, "5026", "Abdallah Behiry", ROLE_HEAD, "MEC")
         # 1. Test auto-generation when task_id starts with MSG-
         t1 = self.db.add_task(
             project_id="PRJ-01",
-            task_id="MSG-ABCD1234",
             name="HVAC Zone 1 Ducting",
             discipline_id="MEC",
             planned_start_date="2026-10-01",
             planned_end_date="2026-10-10",
             assigned_head_id="5026"  # Abdallah Behiry
         )
-        self.assertFalse(t1["task_id"].startswith("MSG-"))
+        self.assertTrue(t1["task_id"].startswith("TSK-"))
         self.assertEqual(t1["assigned_head_id"], "5026")
 
         # 2. Test get_tasks filtering by assigned_head_id

@@ -29,7 +29,7 @@ EXPECTED_ROLES = {
     "APPROVE_DATE_CHANGE": {A, S}, "REJECT_DATE_CHANGE": {A, S},
     "ADD_DISCIPLINE": {A, S}, "TOGGLE_HIDE_DISCIPLINE": {A, S},
     "CREATE_USER": {A, S}, "UPDATE_USER": {A, S}, "RESET_PASSWORD": {A, S},
-    "ADD_PROJECT": {A, S}, "TOGGLE_HIDE_PROJECT": {A, S},
+    "ADD_PROJECT": {A, S}, "TOGGLE_HIDE_PROJECT": {A, S}, "DELETE_PROJECT": {A, S}, "DELETE_TASK": {A, S},
     "ADD_TASK": {A, S}, "UPDATE_TASK": {A, S}, "UPDATE_TASK_DATES": {A, S}, "TOGGLE_HIDE_TASK": {A, S},
     "GET_ANALYTICS": {A, S},
     "GET_RECENT_LOGS": {A, C, S}, "GET_USERS": {A, C, S}, "EXPORT_EXCEL_REQUEST": {A, C, S},
@@ -287,6 +287,33 @@ class TestIdentityAndScope(unittest.TestCase):
                 sa = await raw_login(server.port, "sa")
                 r = await sa.req("CREATE_USER", {"user_id": "coo2", "full_name": "COO Two", "role": "COO"})
                 self.assertTrue(r["ok"], r)
+            finally:
+                await server.stop()
+        run(scenario())
+
+
+class TestSoftDeleteProtocol(unittest.TestCase):
+    def test_deleted_project_disappears_for_heads_and_keeps_logs(self):
+        async def scenario():
+            server = await start_server()
+            try:
+                h = await raw_login(server.port, "h_urb")
+                p = log_payload()
+                self.assertTrue((await h.req("SUBMIT_LOG", p))["ok"])
+                adm = await raw_login(server.port, "adm")
+                r = await adm.req("DELETE_PROJECT", {"project_id": "P1"})
+                self.assertTrue(r["ok"], r)
+                await h.wait_for(lambda d: d.get("type") == "GLOBAL_DATA_REFRESH")
+                snap = await h.req("GET_SNAPSHOT", {})
+                self.assertNotIn("P1", [x["project_id"] for x in snap["projects"]])
+                self.assertFalse(any(t["project_id"] == "P1" for t in snap["tasks"]))
+                r = await h.req("SUBMIT_LOG", log_payload())
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+                r = await adm.req("GET_PROJECTS", {"include_hidden": True})
+                self.assertNotIn("P1", [x["project_id"] for x in r["projects"]])
+                self.assertTrue(any(l["log_id"] == p["log_id"] for l in server.db.get_progress_logs()))
+                r = await adm.req("DELETE_PROJECT", {"project_id": "P1"})
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
             finally:
                 await server.stop()
         run(scenario())

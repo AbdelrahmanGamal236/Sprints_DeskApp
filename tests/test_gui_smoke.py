@@ -56,6 +56,11 @@ class TestGuiSmoke(unittest.TestCase):
                 ws.on_add_project()
                 self.assertTrue(await wait_until(lambda: ws.tbl_projects.rowCount() == 3))
                 self.assertEqual(ws.cmb_timeline_prj.count(), 3)  # no duplicates after refreshes
+                # Soft delete through the same path the Delete button uses (confirmation dialog skipped)
+                server.db.add_task("P3", "T-TMP", "Temporary", "URB")
+                ws.mutate("DELETE_TASK", {"task_id": "T-TMP"}, "deleted")
+                self.assertTrue(await wait_until(lambda: not any(t["task_id"] == "T-TMP" for t in ws.tasks_data)
+                                                 and ws.toast.label.text() == "deleted"))
                 await logout(ctrl)
 
                 # ---- Head: projects/tasks load, submit a log, toast reflects the server ACK
@@ -64,9 +69,12 @@ class TestGuiSmoke(unittest.TestCase):
                 self.assertTrue(await wait_until(lambda: ws.lst_tasks.count() == 1))
                 ws.lst_tasks.setCurrentRow(0)
                 ws.txt_notes.setPlainText("Smoke test log")
+                ws.spn_percentage.setValue(40)
                 ws.on_submit_log()
                 self.assertTrue(await wait_until(
                     lambda: any(l["notes"] == "Smoke test log" for l in server.db.get_progress_logs())))
+                stored = next(l for l in server.db.get_progress_logs() if l["notes"] == "Smoke test log")
+                self.assertEqual(stored["progress_percentage"], 40)
                 self.assertTrue(await wait_until(lambda: "saved on the Central Server" in ws.toast.label.text()))
                 self.assertEqual(ws.sync_service.pending_count(), 0)
                 await logout(ctrl)
