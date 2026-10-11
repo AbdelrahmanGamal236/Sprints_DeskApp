@@ -33,7 +33,7 @@ class PasswordChangeDialog(QDialog):
         info = QLabel(f"Welcome, User '{user_id}'. You must choose a new password before continuing "
                       f"(at least {self.min_length} characters, not your User ID).", self)
         info.setWordWrap(True)
-        info.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        info.setStyleSheet("color: #A1A1AA; font-size: 12px;")
         layout.addWidget(info)
 
         lbl_new = QLabel("New Password:", self)
@@ -51,7 +51,7 @@ class PasswordChangeDialog(QDialog):
         layout.addWidget(lbl_confirm)
         layout.addWidget(self.txt_confirm)
 
-        self.btn_submit = QPushButton("Update Password & Continue", self)
+        self.btn_submit = QPushButton("Update Password && Continue", self)
         self.btn_submit.clicked.connect(self.on_submit)
         layout.addWidget(self.btn_submit)
 

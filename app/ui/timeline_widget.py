@@ -148,10 +148,10 @@ class TimelineCanvas(QWidget):
 
             # Discipline tag
             disc_pill = QRectF(14, y + 13, 38, 20)
-            painter.setBrush(QColor("#312E81"))
-            painter.setPen(QColor("#818CF8"))
+            painter.setBrush(QColor("#3B0764"))
+            painter.setPen(QColor("#C4B5FD"))
             painter.drawRoundedRect(disc_pill, 4, 4)
-            painter.setPen(QColor("#E0E7FF"))
+            painter.setPen(QColor("#EDE9FE"))
             painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
             painter.drawText(disc_pill, Qt.AlignCenter, disc)
 
@@ -164,7 +164,7 @@ class TimelineCanvas(QWidget):
             # Assigned Head tag
             painter.setPen(QColor("#A1A1AA"))
             painter.setFont(QFont("Segoe UI", 8))
-            head_str = f"👤 {head_name}"
+            head_str = f"Head: {head_name}"
             painter.drawText(QRect(58, y + 24, self.left_margin - 68, 16), Qt.AlignVCenter | Qt.AlignLeft, head_str)
 
             # ----------------- PROGRESSIVE TIMELINE BAR -----------------
@@ -224,7 +224,7 @@ class TimelineCanvas(QWidget):
                         if stage == "Done":
                             s_bg, s_fg = QColor("#064E3B"), QColor("#34D399")
                         elif stage == "In Progress":
-                            s_bg, s_fg = QColor("#1E3A8A"), QColor("#60A5FA")
+                            s_bg, s_fg = QColor("#2E1065"), QColor("#C4B5FD")
                         elif stage == "Revision":
                             s_bg, s_fg = QColor("#78350F"), QColor("#FBBF24")
                         elif stage == "Hold":
@@ -270,7 +270,7 @@ class TimelineCanvas(QWidget):
                 f"<b>{hit_task.get('name')}</b> ({hit_task.get('task_id')})<br/>"
                 f"<b>Discipline:</b> {hit_task.get('discipline_name')}<br/>"
                 f"<b>Assigned Head:</b> {head}<br/>"
-                f"<b>Schedule:</b> {s_date} ➔ {e_date}<br/>"
+                f"<b>Schedule:</b> {s_date} to {e_date}<br/>"
                 f"<b>Progress:</b> {pct}% ({stage})<br/>"
                 f"<b>Revisions:</b> {revs} logs<br/>"
                 f"<b>Team Member:</b> {team_assign}"
@@ -316,7 +316,7 @@ class ProjectProgressiveTimelineWidget(QWidget):
         top_info.addWidget(self.lbl_done_tasks)
 
         self.lbl_in_prog = QLabel("In Progress: 0")
-        self.lbl_in_prog.setStyleSheet("background-color: #1E3A8A; color: #60A5FA; padding: 4px 10px; border-radius: 6px; font-weight: bold;")
+        self.lbl_in_prog.setStyleSheet("background-color: #2E1065; color: #C4B5FD; padding: 4px 10px; border-radius: 6px; font-weight: bold;")
         top_info.addWidget(self.lbl_in_prog)
 
         c_layout.addLayout(top_info)
@@ -332,7 +332,7 @@ class ProjectProgressiveTimelineWidget(QWidget):
         track_layout.setContentsMargins(0, 0, 0, 0)
 
         self.progress_fill = QFrame()
-        self.progress_fill.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C3AED, stop:1 #06B6D4); border-radius: 5px;")
+        self.progress_fill.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6D28D9, stop:1 #A78BFA); border-radius: 5px;")
         track_layout.addWidget(self.progress_fill)
         self.progress_spacer = QFrame()
         track_layout.addWidget(self.progress_spacer)

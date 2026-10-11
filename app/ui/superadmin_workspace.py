@@ -8,7 +8,7 @@ from app.network.client import NetworkClient
 from app.ui.admin_workspace import AdminPanel
 from app.ui.coo_workspace import CooPanel
 from app.ui.components import (
-    ToastNotifier, CollapsiblePanel, RoleWindow, ChangeDebouncer,
+    ToastNotifier, CollapsiblePanel, RoleWindow, ChangeDebouncer, BusyButton,
     setup_modern_table, create_table_action_cell, create_table_item, describe_error
 )
 
@@ -69,10 +69,9 @@ class SuperAdminPanel(QWidget):
         main_layout.setSpacing(10)
 
         self.toast = ToastNotifier(self)
-        main_layout.addWidget(self.toast)
 
         self.tabs = QTabWidget(self)
-        self.tabs.addTab(self.create_accounts_tab(), "Master Accounts & Roles")
+        self.tabs.addTab(self.create_accounts_tab(), "Master Accounts && Roles")
         self.admin_sub = AdminPanel(self.user, self.net_client)
         self.tabs.addTab(self.admin_sub, "Admin Operations")
         self.coo_sub = CooPanel(self.user, self.net_client)
@@ -204,13 +203,16 @@ class SuperAdminPanel(QWidget):
             QMessageBox.warning(self, "Error", "User ID and Full Name are required.")
             return
 
+        busy = BusyButton(self.sender())
+
         def created(_reply):
+            busy()
             self.txt_user_id.clear()
             self.txt_full_name.clear()
             self.toast.show_message(f"{role} account '{uid}' created. Initial password is the User ID.")
 
         self.net_client.call("CREATE_USER", {"user_id": uid, "full_name": fname, "role": role, "discipline_id": disc},
-                             created, lambda e: QMessageBox.critical(self, "Could Not Create Account", describe_error(e)))
+                             created, lambda e: (busy(), QMessageBox.critical(self, "Could Not Create Account", describe_error(e))))
 
     def on_edit_user(self, user: dict):
         dlg = EditAccountDialog(user, self.disciplines_data, self)

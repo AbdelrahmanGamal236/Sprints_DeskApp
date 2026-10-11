@@ -9,7 +9,7 @@ from app.core.settings import app_settings
 from app.network.client import NetworkClient
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_item, describe_error, RoleWindow, restore_splitter
+    setup_modern_table, create_table_item, describe_error, RoleWindow, restore_splitter, BusyButton
 )
 
 class CooPanel(QWidget):
@@ -34,7 +34,6 @@ class CooPanel(QWidget):
         main_layout.addLayout(top_bar)
 
         self.toast = ToastNotifier(self)
-        main_layout.addWidget(self.toast)
 
         # Vertical Splitter: Top (Live Feed), Bottom (Priority Alert & Responses)
         self.main_splitter = QSplitter(Qt.Vertical, central_widget)
@@ -163,7 +162,7 @@ class CooPanel(QWidget):
 
         entry_type = l.get("entry_type") or "NEW"
         rev_num = l.get("revision_number") or 0
-        ctx_str = f"Revision (R{rev_num})" if entry_type == "REVISION" else entry_type
+        ctx_str = f"Revision (R{rev_num})" if entry_type == "REVISION" else {"NEW": "New", "CONTINUATION": "Continuation"}.get(entry_type, entry_type)
         ctx_item = create_table_item(ctx_str, Qt.AlignCenter)
         if entry_type == "REVISION":
             ctx_item.setForeground(Qt.yellow)
@@ -217,7 +216,10 @@ class CooPanel(QWidget):
             QMessageBox.warning(self, "Error", "Target employee and message are required.")
             return
 
+        busy = BusyButton(self.sender())
+
         def sent(reply):
+            busy()
             self.txt_message.clear()
             self._upsert_response_row(reply.get("notification", {}))
             if reply.get("delivered"):
@@ -230,7 +232,7 @@ class CooPanel(QWidget):
             "notification_id": f"NOTIF-{uuid.uuid4().hex.upper()}",
             "target_employee_id": target_emp,
             "message": msg
-        }, sent, lambda e: QMessageBox.critical(self, "Alert Not Sent", describe_error(e)))
+        }, sent, lambda e: (busy(), QMessageBox.critical(self, "Alert Not Sent", describe_error(e))))
 
     def on_export_excel(self):
         from app.ui.export_panel import ExportDialog

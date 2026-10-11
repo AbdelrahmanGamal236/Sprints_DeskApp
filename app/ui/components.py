@@ -6,29 +6,104 @@ from PySide6.QtWidgets import (
 )
 
 
-class ToastNotifier(QFrame):
-    """Inline / Toast style confirmation message box."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("CardFrame")
-        self.layout = QHBoxLayout(self)
+class ToastOverlay(QFrame):
+    """
+    The one notification bar of a window: floats at the bottom centre above the content, never takes
+    layout space, hides itself after a few seconds. Kinds: success (green), queued/warning (amber),
+    error (red).
+    """
+    STYLES = {
+        "success": ("#064E3B", "#10B981"),
+        "warning": ("#78350F", "#F59E0B"),
+        "error": ("#7F1D1D", "#EF4444"),
+    }
+
+    def __init__(self, window: QWidget):
+        super().__init__(window)
+        self.setObjectName("DeskToastOverlay")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)  # never blocks the buttons underneath
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 16, 10)
         self.label = QLabel("", self)
-        self.layout.addWidget(self.label)
+        self.label.setWordWrap(True)
+        self.label.setStyleSheet("color: #FFFFFF; font-size: 13px; font-weight: 600; background: transparent; border: none;")
+        layout.addWidget(self.label)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.hide)
+        window.installEventFilter(self)
         self.hide()
 
-    def show_message(self, text: str, is_error: bool = False, is_warning: bool = False, duration_ms: int = 3500):
+    @classmethod
+    def for_window(cls, window: QWidget) -> "ToastOverlay":
+        overlay = window.findChild(ToastOverlay, "DeskToastOverlay", Qt.FindDirectChildrenOnly)
+        return overlay or cls(window)
+
+    def show_message(self, text: str, kind: str = "success", duration_ms: int = 3500):
+        bg, border = self.STYLES.get(kind, self.STYLES["success"])
+        self.setStyleSheet(f"QFrame#DeskToastOverlay {{ background-color: {bg}; border: 1px solid {border}; "
+                           f"border-radius: 8px; }}")
         self.label.setText(text)
-        if is_error:
-            self.setStyleSheet("QFrame#CardFrame { background-color: #7F1D1D; border: 1px solid #EF4444; color: #FFFFFF; }")
-        elif is_warning:
-            self.setStyleSheet("QFrame#CardFrame { background-color: #78350F; border: 1px solid #F59E0B; color: #FFFFFF; }")
-        else:
-            self.setStyleSheet("QFrame#CardFrame { background-color: #064E3B; border: 1px solid #10B981; color: #FFFFFF; }")
+        self._reposition()
         self.show()
+        self.raise_()
         self.timer.start(duration_ms)
+
+    def _reposition(self):
+        win = self.parentWidget()
+        width = max(320, min(720, win.width() - 40))
+        self.setFixedWidth(width)
+        self.adjustSize()
+        self.move((win.width() - width) // 2, win.height() - self.height() - 44)
+
+    def eventFilter(self, obj, event):
+        if obj is self.parentWidget() and event.type() == event.Type.Resize and self.isVisible():
+            self._reposition()
+        return False
+
+
+class ToastNotifier(QWidget):
+    """
+    Handle used by panels to show notifications. It is an invisible placeholder; messages appear in the
+    owning window's single bottom ToastOverlay (so embedded panels share one notification bar).
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(0, 0)
+        self.hide()
+
+    def _overlay(self) -> ToastOverlay:
+        return ToastOverlay.for_window(self.window())
+
+    @property
+    def label(self) -> QLabel:
+        return self._overlay().label
+
+    def show_message(self, text: str, is_error: bool = False, is_warning: bool = False, duration_ms: int = 3500):
+        kind = "error" if is_error else ("warning" if is_warning else "success")
+        if is_error and duration_ms == 3500:
+            duration_ms = 7000  # errors stay a little longer
+        self._overlay().show_message(text, kind, duration_ms)
+
+
+class ConnectionBanner(QLabel):
+    """Red bar at the top of a workspace while the Central Server is unreachable."""
+    def __init__(self, net_client, offline_hint: str = "", parent=None):
+        super().__init__(parent)
+        self.offline_hint = offline_hint or "Changes cannot be saved until the connection returns."
+        self.setWordWrap(True)
+        self.setStyleSheet("background-color: #7F1D1D; color: #FFFFFF; border: 1px solid #EF4444; "
+                           "border-radius: 6px; padding: 6px 10px; font-weight: 600;")
+        net_client.connection_status_changed.connect(self.on_status)
+        self.setVisible(not net_client.is_connected)
+
+    def on_status(self, connected: bool, message: str):
+        if connected:
+            self.hide()
+        else:
+            self.setText(f"Not connected to the Central Server - reconnecting automatically. {self.offline_hint}")
+            self.show()
 
 
 class SyncStatusBadge(QLabel):
@@ -52,7 +127,9 @@ class SyncStatusBadge(QLabel):
         if failed_count:
             text += f" - {failed_count} failed"
         self.setText(text)
-        self.setStyleSheet(self.styleSheet()) # Force restyle refresh
+        # objectName drives the colour in the QSS; re-polish so the new name takes effect
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 def describe_error(exc: Exception) -> str:
@@ -96,20 +173,20 @@ class BlockingCenterModal(QDialog):
         layout.addWidget(header)
 
         info_label = QLabel(f"COO ({coo_id}) has dispatched an urgent instruction:", self)
-        info_label.setStyleSheet("font-weight: 600; color: #CBD5E1;")
+        info_label.setStyleSheet("font-weight: 600; color: #D4D4D8;")
         layout.addWidget(info_label)
 
         msg_card = QFrame(self)
-        msg_card.setStyleSheet("background-color: #1E293B; border: 1px solid #3B82F6; border-radius: 8px; padding: 12px;")
+        msg_card.setStyleSheet("background-color: #27272A; border: 1px solid #8B5CF6; border-radius: 8px; padding: 12px;")
         msg_layout = QVBoxLayout(msg_card)
         self.msg_text = QLabel(message, msg_card)
         self.msg_text.setWordWrap(True)
-        self.msg_text.setStyleSheet("font-size: 14px; color: #F8FAFC;")
+        self.msg_text.setStyleSheet("font-size: 14px; color: #FAFAFA;")
         msg_layout.addWidget(self.msg_text)
         layout.addWidget(msg_card)
 
         instruction = QLabel("You must explicitly Accept or Deny this request to dismiss this dialog.", self)
-        instruction.setStyleSheet("font-size: 11px; color: #94A3B8; italic: true;")
+        instruction.setStyleSheet("font-size: 11px; color: #A1A1AA; font-style: italic;")
         instruction.setAlignment(Qt.AlignCenter)
         layout.addWidget(instruction)
 
@@ -161,7 +238,7 @@ class CopyrightFooter(QLabel):
     def __init__(self, parent=None):
         super().__init__("© All Rights Reserved to Eng. Abdelrahman Gamal & Eng. Tolimy", parent)
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("font-size: 11px; color: #64748B; padding: 6px; font-weight: 500;")
+        self.setStyleSheet("font-size: 11px; color: #71717A; padding: 6px; font-weight: 500;")
 
 
 class ChangeDebouncer(QObject):
@@ -213,6 +290,10 @@ class RoleWindow(QMainWindow):
         btn_logout.clicked.connect(self.on_logout)
         top_bar.addWidget(btn_logout)
         layout.addLayout(top_bar)
+
+        net_client = getattr(panel, "net_client", None)
+        if net_client is not None:
+            layout.addWidget(ConnectionBanner(net_client, parent=self))
 
         layout.addWidget(panel, 1)
         layout.addWidget(CopyrightFooter(self))
@@ -310,11 +391,11 @@ class KpiMetricCard(QFrame):
     Executive-level Dashboard KPI Card.
     Features: Category label, bold numerical metric, subtitle, left accent border, and icon badge.
     """
-    def __init__(self, title: str, initial_value: str = "0", icon: str = "📊", accent_color: str = "#8B5CF6", subtitle: str = "", parent=None):
+    def __init__(self, title: str, initial_value: str = "0", icon: str = "", accent_color: str = "#8B5CF6", subtitle: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("KpiCard")
         self.accent_color = accent_color
-        self.setFixedHeight(84)
+        self.setMinimumHeight(96)
         self.setStyleSheet(f"QFrame#KpiCard {{ border-left: 4px solid {accent_color}; }}")
 
         layout = QHBoxLayout(self)
@@ -326,7 +407,7 @@ class KpiMetricCard(QFrame):
         left_stack.setSpacing(2)
 
         self.lbl_title = QLabel(title.upper(), self)
-        self.lbl_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #94A3B8; letter-spacing: 0.5px;")
+        self.lbl_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #A1A1AA; letter-spacing: 0.5px;")
         left_stack.addWidget(self.lbl_title)
 
         self.lbl_value = QLabel(initial_value, self)
@@ -335,7 +416,7 @@ class KpiMetricCard(QFrame):
 
         if subtitle:
             lbl_sub = QLabel(subtitle, self)
-            lbl_sub.setStyleSheet("font-size: 11px; color: #64748B;")
+            lbl_sub.setStyleSheet("font-size: 11px; color: #71717A;")
             left_stack.addWidget(lbl_sub)
 
         left_stack.addStretch()
@@ -345,13 +426,16 @@ class KpiMetricCard(QFrame):
         self.icon_badge = QLabel(icon, self)
         self.icon_badge.setAlignment(Qt.AlignCenter)
         self.icon_badge.setFixedSize(38, 38)
+        r, g, b = int(accent_color[1:3], 16), int(accent_color[3:5], 16), int(accent_color[5:7], 16)
         self.icon_badge.setStyleSheet(f"""
-            background-color: {accent_color}22;
+            background-color: rgba({r}, {g}, {b}, 40);
             color: {accent_color};
             border-radius: 8px;
-            font-size: 18px;
+            font-size: 12px;
+            font-weight: 800;
         """)
         layout.addWidget(self.icon_badge)
+        self.icon_badge.setVisible(bool(icon))
 
     def set_value(self, val):
         self.lbl_value.setText(str(val))
@@ -481,3 +565,16 @@ class CollapsiblePanel(QFrame):
         self.toggled.emit(collapsed)
 
 
+class BusyButton:
+    """Disables a button while a request runs: `done = BusyButton(btn)` then call `done()` in the callbacks."""
+    def __init__(self, button: QPushButton = None):
+        self.button = button if isinstance(button, QPushButton) else None
+        if self.button is not None:
+            self.button.setEnabled(False)
+
+    def __call__(self, *_):
+        if self.button is not None:
+            try:
+                self.button.setEnabled(True)
+            except RuntimeError:  # button already deleted (table rebuilt)
+                pass

@@ -12,7 +12,7 @@ from app.network.client import NetworkClient
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
     setup_modern_table, create_table_action_cell, create_table_item, KpiMetricCard, describe_error,
-    ChangeDebouncer, RoleWindow, restore_splitter
+    ChangeDebouncer, RoleWindow, restore_splitter, BusyButton
 )
 from app.ui.timeline_widget import ProjectProgressiveTimelineWidget
 from app.ui.export_panel import ExportPanel
@@ -38,15 +38,14 @@ class AdminPanel(QWidget):
         main_layout.setSpacing(10)
 
         self.toast = ToastNotifier(self)
-        main_layout.addWidget(self.toast)
 
         # Tabs
         self.tabs = QTabWidget(self)
-        self.tabs.addTab(self.create_employee_tab(), "Manage Heads & Users")
+        self.tabs.addTab(self.create_employee_tab(), "Manage Heads && Users")
         self.tabs.addTab(self.create_project_tab(), "Manage Projects")
-        self.tabs.addTab(self.create_task_tab(), "Manage Tasks & Disciplines")
-        self.tabs.addTab(self.create_timeline_tab(), "Project Timeline & Progress")
-        self.tabs.addTab(self.create_analysis_tab(), "Analysis & Revision Insights")
+        self.tabs.addTab(self.create_task_tab(), "Manage Tasks && Disciplines")
+        self.tabs.addTab(self.create_timeline_tab(), "Project Timeline && Progress")
+        self.tabs.addTab(self.create_analysis_tab(), "Analysis && Revision Insights")
         self.tabs.addTab(self.create_export_tab(), "Excel Reports")
         main_layout.addWidget(self.tabs)
 
@@ -106,13 +105,17 @@ class AdminPanel(QWidget):
 
     def mutate(self, action: str, payload: dict, success_msg: str, on_ok=None, error_title: str = "Action Failed"):
         """Send a change to the server; report the real outcome (never a success toast before the server confirms)."""
+        busy = BusyButton(self.sender())  # the clicked button stays disabled until the server answers
+
         def ok(reply):
+            busy()
             if success_msg:
                 self.toast.show_message(success_msg)
             if on_ok:
                 on_ok(reply)
 
         def err(exc):
+            busy()
             QMessageBox.critical(self, error_title, describe_error(exc))
         self.net_client.call(action, payload, ok, err)
 
@@ -508,7 +511,7 @@ class AdminPanel(QWidget):
             ]
             for h in heads:
                 name_disp = h.get("full_name") or h["user_id"]
-                cmb_head.addItem(f"👤 {name_disp} ({h['user_id']})", h["user_id"])
+                cmb_head.addItem(f"{name_disp} ({h['user_id']})", h["user_id"])
 
         cmb_disc.currentIndexChanged.connect(update_head_options)
         update_head_options()
@@ -534,7 +537,7 @@ class AdminPanel(QWidget):
         btn_cancel.clicked.connect(dlg.reject)
         btn_row.addWidget(btn_cancel)
 
-        btn_add = QPushButton("Create & Assign Task", dlg)
+        btn_add = QPushButton("Create && Assign Task", dlg)
         btn_row.addWidget(btn_add)
         d_layout.addLayout(btn_row)
 
@@ -664,10 +667,10 @@ class AdminPanel(QWidget):
             tbl.setItem(r_idx, 1, create_table_item(t["name"], Qt.AlignLeft | Qt.AlignVCenter))
             tbl.setItem(r_idx, 2, create_table_item(t.get("discipline_name") or t.get("discipline_id") or "Unassigned", Qt.AlignCenter))
 
-            head_display = t.get("assigned_head_name") or (f"ID: {t['assigned_head_id']}" if t.get("assigned_head_id") else "👥 All Heads (Discipline)")
+            head_display = t.get("assigned_head_name") or (f"ID: {t['assigned_head_id']}" if t.get("assigned_head_id") else "All Heads (Discipline)")
             tbl.setItem(r_idx, 3, create_table_item(head_display, Qt.AlignLeft | Qt.AlignVCenter))
 
-            p_dates = f"{t.get('planned_start_date') or 'TBD'} ➔ {t.get('planned_end_date') or 'TBD'}"
+            p_dates = f"{t.get('planned_start_date') or 'TBD'} to {t.get('planned_end_date') or 'TBD'}"
             tbl.setItem(r_idx, 4, create_table_item(p_dates, Qt.AlignCenter))
 
             tbl.setItem(r_idx, 5, create_table_item("Hidden" if t.get("is_hidden") else "Active", Qt.AlignCenter))
@@ -731,7 +734,7 @@ class AdminPanel(QWidget):
             sel_head_idx = 0
             for h in heads:
                 name_disp = h.get("full_name") or h["user_id"]
-                cmb_head.addItem(f"👤 {name_disp} ({h['user_id']})", h["user_id"])
+                cmb_head.addItem(f"{name_disp} ({h['user_id']})", h["user_id"])
                 if h["user_id"] == task.get("assigned_head_id"):
                     sel_head_idx = cmb_head.count() - 1
             cmb_head.setCurrentIndex(sel_head_idx)
@@ -869,7 +872,7 @@ class AdminPanel(QWidget):
             self.tbl_pending_proposals.setItem(r_idx, 0, create_table_item(p["proposal_id"], Qt.AlignCenter))
             self.tbl_pending_proposals.setItem(r_idx, 1, create_table_item(p["task_name"], Qt.AlignLeft | Qt.AlignVCenter))
             self.tbl_pending_proposals.setItem(r_idx, 2, create_table_item(p.get("discipline_name") or p.get("discipline_id") or "General", Qt.AlignCenter))
-            p_sched = f"{p.get('planned_start_date') or 'TBD'} ➔ {p.get('planned_end_date') or 'TBD'}"
+            p_sched = f"{p.get('planned_start_date') or 'TBD'} to {p.get('planned_end_date') or 'TBD'}"
             self.tbl_pending_proposals.setItem(r_idx, 3, create_table_item(p_sched, Qt.AlignCenter))
             self.tbl_pending_proposals.setItem(r_idx, 4, create_table_item(p.get("proposer_name") or p["proposed_by_id"], Qt.AlignLeft | Qt.AlignVCenter))
             self.tbl_pending_proposals.setItem(r_idx, 5, create_table_item(p.get("project_name") or p["project_id"], Qt.AlignLeft | Qt.AlignVCenter))
@@ -927,8 +930,8 @@ class AdminPanel(QWidget):
             self.tbl_pending_date_changes.insertRow(r_idx)
             self.tbl_pending_date_changes.setItem(r_idx, 0, create_table_item(req["request_id"], Qt.AlignCenter))
             self.tbl_pending_date_changes.setItem(r_idx, 1, create_table_item(f"{req.get('task_name')} ({req['task_id']})", Qt.AlignLeft | Qt.AlignVCenter))
-            self.tbl_pending_date_changes.setItem(r_idx, 2, create_table_item(f"{req.get('old_start_date')} ➔ {req.get('old_end_date')}", Qt.AlignCenter))
-            self.tbl_pending_date_changes.setItem(r_idx, 3, create_table_item(f"{req['new_start_date']} ➔ {req['new_end_date']}", Qt.AlignCenter))
+            self.tbl_pending_date_changes.setItem(r_idx, 2, create_table_item(f"{req.get('old_start_date')} to {req.get('old_end_date')}", Qt.AlignCenter))
+            self.tbl_pending_date_changes.setItem(r_idx, 3, create_table_item(f"{req['new_start_date']} to {req['new_end_date']}", Qt.AlignCenter))
             self.tbl_pending_date_changes.setItem(r_idx, 4, create_table_item(req["reason"], Qt.AlignLeft | Qt.AlignVCenter))
             self.tbl_pending_date_changes.setItem(r_idx, 5, create_table_item(req.get("requester_name") or req["requested_by_id"], Qt.AlignLeft | Qt.AlignVCenter))
 
@@ -1042,10 +1045,10 @@ class AdminPanel(QWidget):
         metrics_row = QHBoxLayout()
         metrics_row.setSpacing(12)
 
-        self.kpi_logs = KpiMetricCard("Total Logs", "0", "📋", "#8B5CF6", "Recorded by team")
-        self.kpi_revs = KpiMetricCard("Total Revisions", "0", "🔄", "#F59E0B", "Rework iterations")
-        self.kpi_prjs = KpiMetricCard("Active Projects", "0", "📁", "#10B981", "Currently active")
-        self.kpi_emps = KpiMetricCard("Active Heads", "0", "👥", "#3B82F6", "Supervising disciplines")
+        self.kpi_logs = KpiMetricCard("Total Logs", "0", "LOG", "#8B5CF6", "Recorded by team")
+        self.kpi_revs = KpiMetricCard("Total Revisions", "0", "REV", "#F59E0B", "Rework iterations")
+        self.kpi_prjs = KpiMetricCard("Active Projects", "0", "PRJ", "#10B981", "Currently active")
+        self.kpi_emps = KpiMetricCard("Active Heads", "0", "HDS", "#A78BFA", "Supervising disciplines")
 
         metrics_row.addWidget(self.kpi_logs)
         metrics_row.addWidget(self.kpi_revs)

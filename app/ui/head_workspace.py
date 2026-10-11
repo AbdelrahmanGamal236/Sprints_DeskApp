@@ -13,7 +13,7 @@ from app.network.client import NetworkClient
 from app.services.sync_service import SyncService
 from app.ui.components import (
     ToastNotifier, SyncStatusBadge, BlockingCenterModal, CopyrightFooter, CollapsiblePanel,
-    setup_modern_table, create_table_item, create_table_action_cell, describe_error
+    setup_modern_table, create_table_item, create_table_action_cell, describe_error, ConnectionBanner
 )
 from app.ui.timeline_widget import ProjectProgressiveTimelineWidget
 
@@ -271,8 +271,9 @@ class HeadWorkspace(QMainWindow):
         # Top Bar
         top_bar = QHBoxLayout()
         emp_name = self.user.get("full_name") or self.user_id
-        disc_str = f" [Discipline: {self.discipline_id}]" if self.discipline_id else " [No Discipline Assigned]"
-        header_title = QLabel(f"Employee: {emp_name} ({self.user_id}){disc_str}", self)
+        disc_name = self.user.get("discipline_name") or self.discipline_id
+        disc_str = f" - {disc_name}" if self.discipline_id else " - No Discipline Assigned"
+        header_title = QLabel(f"Head: {emp_name} ({self.user_id}){disc_str}", self)
         header_title.setObjectName("HeaderTitle")
         top_bar.addWidget(header_title)
         top_bar.addStretch()
@@ -293,7 +294,8 @@ class HeadWorkspace(QMainWindow):
         main_layout.addLayout(top_bar)
 
         self.toast = ToastNotifier(self)
-        main_layout.addWidget(self.toast)
+        main_layout.addWidget(ConnectionBanner(
+            self.net_client, "Your logs and requests are saved on this PC and sent automatically when it returns.", self))
 
         # Project selector on top; everything below shows the selected project
         prj_row = QHBoxLayout()
@@ -309,7 +311,7 @@ class HeadWorkspace(QMainWindow):
         self.main_tabs = QTabWidget(self)
         self.main_tabs.addTab(self.create_logging_tab(), "Daily Progress Logging")
         self.main_tabs.addTab(self.create_project_timeline_tab(), "Project Progressive Timeline")
-        self.main_tabs.addTab(self.create_timeline_tab(), "Task Requests & Date Changes Timeline")
+        self.main_tabs.addTab(self.create_timeline_tab(), "Task Requests && Date Changes")
         main_layout.addWidget(self.main_tabs)
 
         main_layout.addWidget(CopyrightFooter(self))
@@ -355,7 +357,8 @@ class HeadWorkspace(QMainWindow):
         self.lst_tasks.setSelectionMode(QAbstractItemView.SingleSelection)
         self.lst_tasks.itemSelectionChanged.connect(self.update_revision_tag_display)
 
-        tab_title = f"{self.discipline_id} (0)" if self.discipline_id else "Unassigned (0)"
+        self.discipline_label = self.user.get("discipline_name") or self.discipline_id or "Unassigned"
+        tab_title = f"{self.discipline_label} (0)"
         self.disc_tabs.addTab(self.lst_tasks, tab_title)
         left_vbox.addWidget(self.disc_tabs)
 
@@ -384,14 +387,14 @@ class HeadWorkspace(QMainWindow):
         # Dates Row
         dates_row = QHBoxLayout()
         s_box = QVBoxLayout()
-        s_box.addWidget(QLabel("3. Start Date:", objectName="FieldLabel"))
+        s_box.addWidget(QLabel("Start Date:", objectName="FieldLabel"))
         self.dt_start = QDateEdit(QDate.currentDate())
         self.dt_start.setCalendarPopup(True)
         s_box.addWidget(self.dt_start)
         dates_row.addLayout(s_box)
 
         e_box = QVBoxLayout()
-        e_box.addWidget(QLabel("4. End Date:", objectName="FieldLabel"))
+        e_box.addWidget(QLabel("End Date:", objectName="FieldLabel"))
         self.dt_end = QDateEdit(QDate.currentDate())
         self.dt_end.setCalendarPopup(True)
         e_box.addWidget(self.dt_end)
@@ -399,7 +402,7 @@ class HeadWorkspace(QMainWindow):
         right_vbox.addLayout(dates_row)
 
         # Task Logging Context / Rework Tag (R1, R2...)
-        right_vbox.addWidget(QLabel("5. Task Logging Context:", objectName="FieldLabel"))
+        right_vbox.addWidget(QLabel("Entry Type:", objectName="FieldLabel"))
         rb_layout = QHBoxLayout()
         self.rb_new = QRadioButton("New Task")
         self.rb_continuation = QRadioButton("Continuation")
@@ -424,7 +427,7 @@ class HeadWorkspace(QMainWindow):
         # Status & Assigned To Row (A5)
         row_status_assign = QHBoxLayout()
         box_st = QVBoxLayout()
-        box_st.addWidget(QLabel("6. Task Status:", objectName="FieldLabel"))
+        box_st.addWidget(QLabel("Progress Stage:", objectName="FieldLabel"))
         self.cmb_progress = QComboBox()
         for s in PROGRESS_STAGES:
             self.cmb_progress.addItem(s)
@@ -437,13 +440,14 @@ class HeadWorkspace(QMainWindow):
         self.spn_percentage.setRange(0, 100)
         self.spn_percentage.setSuffix(" %")
         self.spn_percentage.setSingleStep(5)
+        self.spn_percentage.setMinimumWidth(110)
         box_pct.addWidget(self.spn_percentage)
         row_status_assign.addLayout(box_pct)
         self.cmb_progress.currentTextChanged.connect(
             lambda st: self.spn_percentage.setValue(100) if st == "Done" else None)
 
         box_as = QVBoxLayout()
-        box_as.addWidget(QLabel("7. Assigned To (Team Member Name):", objectName="FieldLabel"))
+        box_as.addWidget(QLabel("Assigned To (Team Member Name):", objectName="FieldLabel"))
         self.txt_assigned_to = QLineEdit()
         self.txt_assigned_to.setPlaceholderText("e.g. Eng. Tarek (optional, max 100 chars)")
         self.txt_assigned_to.setMaxLength(100)
@@ -453,7 +457,7 @@ class HeadWorkspace(QMainWindow):
         right_vbox.addLayout(row_status_assign)
 
         # Notes Box
-        right_vbox.addWidget(QLabel("8. Work Notes & Activity Summary:", objectName="FieldLabel"))
+        right_vbox.addWidget(QLabel("Work Notes & Activity Summary:", objectName="FieldLabel"))
         self.txt_notes = QTextEdit()
         self.txt_notes.setPlaceholderText("Enter detailed daily progress notes, deliverables, or blockers...")
         right_vbox.addWidget(self.txt_notes)
@@ -562,7 +566,7 @@ class HeadWorkspace(QMainWindow):
         p_id = self.cmb_projects.currentData()
         if not p_id:
             self.lst_tasks.clear()
-            self.disc_tabs.setTabText(0, f"{self.discipline_id or 'Unassigned'} (0)")
+            self.disc_tabs.setTabText(0, f"{self.discipline_label} (0)")
             if hasattr(self, "proj_timeline_widget"):
                 self.proj_timeline_widget.load_timeline_data({})
             return
@@ -583,7 +587,7 @@ class HeadWorkspace(QMainWindow):
                 self.lst_tasks.addItem(item)
                 count += 1
 
-        tab_title = f"{self.discipline_id or 'Unassigned'} ({count})"
+        tab_title = f"{self.discipline_label} ({count})"
         self.disc_tabs.setTabText(0, tab_title)
 
         # Request progressive project timeline data from server
@@ -655,6 +659,9 @@ class HeadWorkspace(QMainWindow):
         }
 
         item_id = self.sync_service.submit_progress_log(log_payload)
+        # Guard against accidental double submission
+        self.btn_submit.setEnabled(False)
+        QTimer.singleShot(1500, lambda: self.btn_submit.setEnabled(True))
         self.save_assigned_to_history(assigned_to)
         self.txt_notes.clear()
         self._track_submission(item_id, "Progress log")

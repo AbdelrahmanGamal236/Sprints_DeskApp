@@ -43,7 +43,7 @@ QFrame#KpiCard {
 }
 
 QFrame#KpiCard:hover {
-    border: 1px solid #4F46E5;
+    border: 1px solid #7C3AED;
     background-color: #242428;
 }
 
@@ -74,6 +74,7 @@ QPushButton#CollapseToggle:hover {
 /* Labels */
 QLabel {
     color: #F4F4F5;
+    background: transparent;
 }
 
 QLabel#HeaderTitle {
@@ -192,7 +193,7 @@ QTableWidget QPushButton#SuccessButton:hover {
 }
 
 /* LineEdits and TextEdits */
-QLineEdit, QTextEdit, QDateEdit, QComboBox {
+QLineEdit, QTextEdit, QDateEdit, QComboBox, QSpinBox {
     background-color: #18181B;
     color: #F4F4F5;
     border: 1px solid #3F3F46;
@@ -201,7 +202,17 @@ QLineEdit, QTextEdit, QDateEdit, QComboBox {
     selection-background-color: #8B5CF6;
 }
 
-QLineEdit:focus, QTextEdit:focus, QDateEdit:focus, QComboBox:focus {
+QSpinBox::up-button, QSpinBox::down-button {
+    width: 18px;
+    background-color: #27272A;
+    border: none;
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background-color: #3F3F46;
+}
+
+QLineEdit:focus, QTextEdit:focus, QDateEdit:focus, QComboBox:focus, QSpinBox:focus {
     border: 1px solid #8B5CF6;
 }
 
