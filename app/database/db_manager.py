@@ -1459,11 +1459,13 @@ class DBManager:
             if employee_id:
                 query += " AND l.employee_id = ?"
                 params.append(employee_id)
+            # Date range uses overlap semantics: a log is included when its work period
+            # [start_date, end_date] touches the requested period at all.
             if start_date:
-                query += " AND l.start_date >= ?"
+                query += " AND l.end_date >= ?"
                 params.append(start_date)
             if end_date:
-                query += " AND l.end_date <= ?"
+                query += " AND l.start_date <= ?"
                 params.append(end_date)
 
             query += " ORDER BY l.submitted_at DESC, l.rowid DESC"
@@ -1546,47 +1548,64 @@ class DBManager:
 
     # ------------------- ANALYTICS API -------------------
     def get_analytics_data(self) -> dict:
+        """
+        Dashboard numbers. Every aggregate is computed in its own subquery so joins never multiply
+        counts. Task status = the stage of the task's most recent log.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) AS count FROM progress_logs")
-            total_logs = cursor.fetchone()["count"]
-
-            cursor.execute("SELECT COUNT(*) AS count FROM progress_logs WHERE entry_type = 'REVISION'")
-            total_revisions = cursor.fetchone()["count"]
-
-            cursor.execute("SELECT COUNT(*) AS count FROM projects WHERE is_hidden = 0")
-            active_projects = cursor.fetchone()["count"]
-
-            cursor.execute("SELECT COUNT(*) AS count FROM users WHERE role = 'HEAD'")
-            active_employees = cursor.fetchone()["count"]
+            total_logs = cursor.execute("SELECT COUNT(*) FROM progress_logs").fetchone()[0]
+            total_revisions = cursor.execute(
+                "SELECT COUNT(*) FROM progress_logs WHERE entry_type = 'REVISION'").fetchone()[0]
+            active_projects = cursor.execute(
+                "SELECT COUNT(*) FROM projects WHERE is_hidden = 0 AND is_deleted = 0").fetchone()[0]
+            active_employees = cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'HEAD'").fetchone()[0]
 
             cursor.execute("""
             SELECT u.user_id, u.full_name, u.discipline_id, d.name AS discipline_name,
                    COUNT(l.log_id) AS total_logs,
-                   SUM(CASE WHEN l.entry_type = 'NEW' THEN 1 ELSE 0 END) AS new_logs,
-                   SUM(CASE WHEN l.entry_type = 'CONTINUATION' THEN 1 ELSE 0 END) AS cont_logs,
-                   SUM(CASE WHEN l.entry_type = 'REVISION' THEN 1 ELSE 0 END) AS rev_logs
+                   COALESCE(SUM(l.entry_type = 'NEW'), 0) AS new_logs,
+                   COALESCE(SUM(l.entry_type = 'CONTINUATION'), 0) AS cont_logs,
+                   COALESCE(SUM(l.entry_type = 'REVISION'), 0) AS rev_logs
             FROM users u
             LEFT JOIN progress_logs l ON u.user_id = l.employee_id
             LEFT JOIN disciplines d ON u.discipline_id = d.discipline_id
             WHERE u.role = 'HEAD'
-            GROUP BY u.user_id, u.full_name
-            ORDER BY rev_logs DESC, total_logs DESC
+            GROUP BY u.user_id
+            ORDER BY rev_logs DESC, total_logs DESC, u.user_id
             """)
             emp_stats = [dict(r) for r in cursor.fetchall()]
 
             cursor.execute("""
+            WITH live_tasks AS (
+                SELECT task_id, project_id FROM tasks WHERE is_deleted = 0 AND is_hidden = 0
+            ),
+            latest AS (
+                SELECT task_id, progress_stage,
+                       ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY submitted_at DESC, rowid DESC) AS rn
+                FROM progress_logs
+            ),
+            task_status AS (
+                SELECT lt.project_id, lt.task_id, lat.progress_stage AS stage
+                FROM live_tasks lt LEFT JOIN latest lat ON lat.task_id = lt.task_id AND lat.rn = 1
+            ),
+            revs AS (
+                SELECT project_id, COUNT(*) AS n FROM progress_logs WHERE entry_type = 'REVISION' GROUP BY project_id
+            )
             SELECT p.project_id, p.name AS project_name,
-                   COUNT(DISTINCT t.task_id) AS total_tasks,
-                   SUM(CASE WHEN l.entry_type = 'REVISION' THEN 1 ELSE 0 END) AS total_revisions,
-                   SUM(CASE WHEN l.progress_stage = 'Done' THEN 1 ELSE 0 END) AS done_count,
-                   SUM(CASE WHEN l.progress_stage = 'In Progress' THEN 1 ELSE 0 END) AS in_prog_count,
-                   SUM(CASE WHEN l.progress_stage = 'Hold' THEN 1 ELSE 0 END) AS hold_count
+                   COUNT(ts.task_id) AS total_tasks,
+                   COALESCE(SUM(ts.stage = 'Done'), 0) AS done_count,
+                   COALESCE(SUM(ts.stage = 'In Progress'), 0) AS in_prog_count,
+                   COALESCE(SUM(ts.stage = 'Hold'), 0) AS hold_count,
+                   COALESCE(SUM(ts.stage = 'Revision'), 0) AS revision_stage_count,
+                   COALESCE(SUM(ts.task_id IS NOT NULL AND ts.stage IS NULL), 0) AS not_started_count,
+                   COALESCE(r.n, 0) AS total_revisions
             FROM projects p
-            LEFT JOIN tasks t ON p.project_id = t.project_id
-            LEFT JOIN progress_logs l ON p.project_id = l.project_id
-            WHERE p.is_hidden = 0
-            GROUP BY p.project_id, p.name
+            LEFT JOIN task_status ts ON ts.project_id = p.project_id
+            LEFT JOIN revs r ON r.project_id = p.project_id
+            WHERE p.is_hidden = 0 AND p.is_deleted = 0
+            GROUP BY p.project_id
+            ORDER BY p.project_id
             """)
             prj_stats = [dict(r) for r in cursor.fetchall()]
 
@@ -1600,7 +1619,7 @@ class DBManager:
         }
 
     def get_project_timeline_data(self, project_id: str, discipline_id: str = None, assigned_head_id: str = None) -> dict:
-        """Returns progressive timeline analysis for project visualization."""
+        """Timeline for one project: each task with its latest log and revision count (two queries total)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
@@ -1610,78 +1629,59 @@ class DBManager:
 
             tasks = self.get_tasks(project_id=project_id, discipline_id=discipline_id,
                                    assigned_head_id=assigned_head_id, include_hidden=False)
+            cursor.execute("""
+            WITH ranked AS (
+                SELECT task_id, progress_percentage, progress_stage, assigned_to,
+                       ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY submitted_at DESC, rowid DESC) AS rn
+                FROM progress_logs WHERE project_id = ?
+            )
+            SELECT r.task_id, r.progress_percentage, r.progress_stage, r.assigned_to,
+                   (SELECT COUNT(*) FROM progress_logs x WHERE x.task_id = r.task_id AND x.entry_type = 'REVISION') AS rev_count
+            FROM ranked r WHERE r.rn = 1
+            """, (project_id,))
+            latest = {row["task_id"]: dict(row) for row in cursor.fetchall()}
 
-            task_timeline = []
-            total_tasks = len(tasks)
-            completed_tasks = 0
-            in_progress_tasks = 0
-            hold_tasks = 0
-            revision_tasks = 0
-            total_progress_sum = 0
+        counters = {"Done": 0, "In Progress": 0, "Hold": 0, "Revision": 0}
+        total_progress_sum = 0
+        task_timeline = []
+        for t in tasks:
+            last = latest.get(t["task_id"])
+            cur_pct = (last["progress_percentage"] or 0) if last else 0
+            cur_stage = last["progress_stage"] if last else "Not Started"
+            if cur_stage == "Done":
+                cur_pct = 100
+            if cur_stage in counters:
+                counters[cur_stage] += 1
+            total_progress_sum += cur_pct
+            task_timeline.append({
+                "task_id": t["task_id"],
+                "name": t["name"],
+                "discipline_id": t.get("discipline_id"),
+                "discipline_name": t.get("discipline_name") or t.get("discipline_id") or "Unassigned",
+                "assigned_head_id": t.get("assigned_head_id"),
+                "assigned_head_name": t.get("assigned_head_name"),
+                "planned_start_date": t.get("planned_start_date"),
+                "planned_end_date": t.get("planned_end_date"),
+                "progress_percentage": cur_pct,
+                "progress_stage": cur_stage,
+                "revision_count": last["rev_count"] if last else 0,
+                "latest_assigned_to": (last["assigned_to"] or "") if last else ""
+            })
 
-            for t in tasks:
-                cursor.execute("""
-                SELECT progress_percentage, progress_stage, entry_type, revision_number, submitted_at, notes, assigned_to
-                FROM progress_logs
-                WHERE task_id = ?
-                ORDER BY submitted_at DESC, log_id DESC
-                LIMIT 1
-                """, (t["task_id"],))
-                latest_log = cursor.fetchone()
-
-                cursor.execute("""
-                SELECT COUNT(*) AS rev_count
-                FROM progress_logs
-                WHERE task_id = ? AND entry_type = 'REVISION'
-                """, (t["task_id"],))
-                rev_row = cursor.fetchone()
-                rev_count = rev_row["rev_count"] if rev_row else 0
-
-                cur_pct = latest_log["progress_percentage"] if latest_log else 0
-                cur_stage = latest_log["progress_stage"] if latest_log else "Not Started"
-
-                if cur_stage == "Done" or cur_pct >= 100:
-                    completed_tasks += 1
-                elif cur_stage == "Revision":
-                    revision_tasks += 1
-                elif cur_stage == "Hold":
-                    hold_tasks += 1
-                elif cur_stage == "In Progress":
-                    in_progress_tasks += 1
-
-                total_progress_sum += cur_pct
-
-                task_timeline.append({
-                    "task_id": t["task_id"],
-                    "name": t["name"],
-                    "discipline_id": t.get("discipline_id"),
-                    "discipline_name": t.get("discipline_name") or t.get("discipline_id") or "Unassigned",
-                    "assigned_head_id": t.get("assigned_head_id"),
-                    "assigned_head_name": t.get("assigned_head_name"),
-                    "planned_start_date": t.get("planned_start_date"),
-                    "planned_end_date": t.get("planned_end_date"),
-                    "progress_percentage": cur_pct,
-                    "progress_stage": cur_stage,
-                    "revision_count": rev_count,
-                    "latest_assigned_to": latest_log["assigned_to"] if latest_log else ""
-                })
-
-            overall_progress = round(total_progress_sum / total_tasks) if total_tasks > 0 else 0
-
-            task_timeline.sort(key=lambda x: (x["planned_start_date"] or "9999", x["task_id"]))
-
-            return {
-                "project_id": prj["project_id"],
-                "project_name": prj["name"],
-                "description": prj["description"],
-                "total_tasks": total_tasks,
-                "completed_tasks": completed_tasks,
-                "in_progress_tasks": in_progress_tasks,
-                "revision_tasks": revision_tasks,
-                "hold_tasks": hold_tasks,
-                "overall_progress_percentage": overall_progress,
-                "tasks": task_timeline
-            }
+        total_tasks = len(tasks)
+        task_timeline.sort(key=lambda x: (x["planned_start_date"] or "9999", x["task_id"]))
+        return {
+            "project_id": prj["project_id"],
+            "project_name": prj["name"],
+            "description": prj["description"],
+            "total_tasks": total_tasks,
+            "completed_tasks": counters["Done"],
+            "in_progress_tasks": counters["In Progress"],
+            "revision_tasks": counters["Revision"],
+            "hold_tasks": counters["Hold"],
+            "overall_progress_percentage": round(total_progress_sum / total_tasks) if total_tasks else 0,
+            "tasks": task_timeline
+        }
 
 
 class ClientQueueDBManager:

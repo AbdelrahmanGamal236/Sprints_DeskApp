@@ -661,7 +661,7 @@ class CentralWebSocketServer:
             self.excel_service.export_logs_to_excel,
             project_id=payload.get("project_id"), discipline_id=payload.get("discipline_id"),
             employee_id=payload.get("employee_id"), start_date=payload.get("start_date"),
-            end_date=payload.get("end_date")))
+            end_date=payload.get("end_date"), generated_by=f"{session.full_name or ''} ({session.user_id})".strip()))
         # Stream the workbook in chunks so no frame exceeds the WebSocket size limit.
         size = self.export_chunk_bytes
         total = max(1, (len(raw) + size - 1) // size)
