@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QMessageBox, QFileDialog, QSplitter
 )
 from app.core.settings import app_settings
-from app.network.client import NetworkClient, run_async
+from app.network.client import NetworkClient
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
     setup_modern_table, create_table_item, describe_error, RoleWindow, restore_splitter
@@ -28,7 +28,7 @@ class CooPanel(QWidget):
 
         top_bar = QHBoxLayout()
         top_bar.addStretch()
-        self.btn_export = QPushButton("Export Categorized Report", self)
+        self.btn_export = QPushButton("Excel Report...", self)
         self.btn_export.clicked.connect(self.on_export_excel)
         top_bar.addWidget(self.btn_export)
         main_layout.addLayout(top_bar)
@@ -233,19 +233,8 @@ class CooPanel(QWidget):
         }, sent, lambda e: QMessageBox.critical(self, "Alert Not Sent", describe_error(e)))
 
     def on_export_excel(self):
-        self.btn_export.setEnabled(False)
-        self.toast.show_message("Generating the Excel report on the Central Server...", duration_ms=10000)
-        run_async(self.net_client.export_excel({}), self._on_export_ready, self._on_export_failed)
-
-    def _on_export_failed(self, exc):
-        self.btn_export.setEnabled(True)
-        QMessageBox.critical(self, "Export Error", describe_error(exc))
-
-    def _on_export_ready(self, result):
-        from app.ui.admin_workspace import save_excel_report
-        self.btn_export.setEnabled(True)
-        raw_bytes, default_name = result
-        save_excel_report(self, raw_bytes, default_name)
+        from app.ui.export_panel import ExportDialog
+        ExportDialog(self.net_client, self).exec()
 
     def restore_layout(self):
         h = max(self.height(), 750)

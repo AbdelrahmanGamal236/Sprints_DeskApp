@@ -8,13 +8,14 @@ from PySide6.QtWidgets import (
 )
 from app.core.settings import app_settings
 from app.core.config import ROLE_HEAD, ROLE_COO, ROLE_ADMIN, ROLE_SUPER_ADMIN
-from app.network.client import NetworkClient, run_async
+from app.network.client import NetworkClient
 from app.ui.components import (
     ToastNotifier, CopyrightFooter, CollapsiblePanel,
     setup_modern_table, create_table_action_cell, create_table_item, KpiMetricCard, describe_error,
     ChangeDebouncer, RoleWindow, restore_splitter
 )
 from app.ui.timeline_widget import ProjectProgressiveTimelineWidget
+from app.ui.export_panel import ExportPanel
 
 class AdminPanel(QWidget):
     """All Admin tools. Shown in AdminWorkspace and embedded in the Super Admin console."""
@@ -99,7 +100,6 @@ class AdminPanel(QWidget):
     def _on_users(self, r):
         self.users_data = r.get("users", [])
         self.update_users_views()
-        self.update_export_heads_filter()
 
     def on_request_error(self, exc):
         self.toast.show_message(describe_error(exc), is_error=True)
@@ -346,8 +346,6 @@ class AdminPanel(QWidget):
         if hasattr(self, "cmb_timeline_prj"):
             self.cmb_timeline_prj.blockSignals(True)
             self.cmb_timeline_prj.clear()
-        self.cmb_export_prj.clear()
-        self.cmb_export_prj.addItem("All Projects", None)
 
         for r_idx, p in enumerate(self.projects_data):
             self.tbl_projects.insertRow(r_idx)
@@ -368,7 +366,6 @@ class AdminPanel(QWidget):
                 self.cmb_task_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
                 if hasattr(self, "cmb_timeline_prj"):
                     self.cmb_timeline_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
-            self.cmb_export_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
 
         idx = self.cmb_task_prj.findData(prev_task_prj)
         self.cmb_task_prj.setCurrentIndex(idx if idx >= 0 else 0)
@@ -583,14 +580,11 @@ class AdminPanel(QWidget):
         self.cmb_emp_disc.clear()
         self.cmb_filter_emp_disc.clear()
         self.cmb_filter_emp_disc.addItem("All Disciplines", None)
-        self.cmb_export_disc.clear()
-        self.cmb_export_disc.addItem("All Disciplines", None)
 
         for d in self.disciplines_data:
             if not d.get("is_hidden"):
                 self.cmb_emp_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
             self.cmb_filter_emp_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
-            self.cmb_export_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
 
         self.update_disciplines_management_table()
         self.update_tasks_views()
@@ -1137,74 +1131,8 @@ class AdminPanel(QWidget):
 
     # ------------------- TAB 5: EXCEL EXPORT (A4, B2) -------------------
     def create_export_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        card = QFrame()
-        card.setObjectName("CardFrame")
-        c_layout = QVBoxLayout(card)
-        c_layout.addWidget(QLabel("Export Progress Logs with Discipline Categorization (A4)", objectName="SubTitle"))
-
-        filters_grid = QHBoxLayout()
-
-        b_p = QVBoxLayout()
-        b_p.addWidget(QLabel("Project Filter:", objectName="FieldLabel"))
-        self.cmb_export_prj = QComboBox()
-        b_p.addWidget(self.cmb_export_prj)
-        filters_grid.addLayout(b_p)
-
-        b_d = QVBoxLayout()
-        b_d.addWidget(QLabel("Discipline Filter:", objectName="FieldLabel"))
-        self.cmb_export_disc = QComboBox()
-        self.cmb_export_disc.currentIndexChanged.connect(self.update_export_heads_filter)
-        b_d.addWidget(self.cmb_export_disc)
-        filters_grid.addLayout(b_d)
-
-        b_h = QVBoxLayout()
-        b_h.addWidget(QLabel("Head Employee Filter:", objectName="FieldLabel"))
-        self.cmb_export_head = QComboBox()
-        self.cmb_export_head.addItem("All Heads", None)
-        b_h.addWidget(self.cmb_export_head)
-        filters_grid.addLayout(b_h)
-
-        c_layout.addLayout(filters_grid)
-
-        self.btn_export = QPushButton("Export Categorized Excel Report")
-        self.btn_export.setMinimumHeight(44)
-        self.btn_export.clicked.connect(self.on_request_excel_export)
-        c_layout.addWidget(self.btn_export)
-
-        c_layout.addStretch()
-        layout.addWidget(card)
-        return widget
-
-    def update_export_heads_filter(self):
-        selected_disc = self.cmb_export_disc.currentData()
-        self.cmb_export_head.clear()
-        self.cmb_export_head.addItem("All Heads", None)
-        for u in self.users_data:
-            if u.get("role") == ROLE_HEAD:
-                if not selected_disc or u.get("discipline_id") == selected_disc:
-                    self.cmb_export_head.addItem(f"{u.get('full_name') or u['user_id']} ({u['user_id']})", u["user_id"])
-
-    def on_request_excel_export(self):
-        filters = {
-            "project_id": self.cmb_export_prj.currentData(),
-            "discipline_id": self.cmb_export_disc.currentData(),
-            "employee_id": self.cmb_export_head.currentData(),
-        }
-        self.btn_export.setEnabled(False)
-        self.toast.show_message("Generating the Excel report on the Central Server...", duration_ms=10000)
-        run_async(self.net_client.export_excel(filters), self._on_export_ready, self._on_export_failed)
-
-    def _on_export_failed(self, exc):
-        self.btn_export.setEnabled(True)
-        QMessageBox.critical(self, "Export Error", describe_error(exc))
-
-    def _on_export_ready(self, result):
-        self.btn_export.setEnabled(True)
-        raw_bytes, default_name = result
-        save_excel_report(self, raw_bytes, default_name)
+        self.export_panel = ExportPanel(self.net_client, self.toast)
+        return self.export_panel
 
     def on_task_proposal_event(self, data: dict):
         prop = data.get("proposal", {})
@@ -1237,15 +1165,3 @@ class AdminWorkspace(RoleWindow):
                          AdminPanel(user_dict, net_client))
 
 
-def save_excel_report(parent, raw_bytes: bytes, default_name: str):
-    """Ask where to save a server-generated workbook and write it."""
-    file_path, _ = QFileDialog.getSaveFileName(parent, "Save Excel Report", default_name, "Excel Files (*.xlsx)")
-    if not file_path:
-        return
-    try:
-        with open(file_path, "wb") as f:
-            f.write(raw_bytes)
-    except OSError as e:
-        QMessageBox.critical(parent, "Save Failed", f"Could not save the report:\n{e}")
-        return
-    QMessageBox.information(parent, "Success", f"Excel report saved to:\n{file_path}")
