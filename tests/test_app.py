@@ -224,7 +224,7 @@ class TestDeskAppSystem(unittest.TestCase):
         ws_all = wb["All Logs"]
         headers = [cell.value for cell in ws_all[1]]
         self.assertIn("Head Discipline", headers)
-        self.assertIn("Task Discipline", headers)
+        self.assertIn("Discipline", headers)
         self.assertIn("Assigned To", headers)
 
     def test_assigned_to_persistence(self):

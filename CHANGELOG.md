@@ -2,6 +2,35 @@
 
 Finding IDs (F-xx) refer to `AUDIT_REPORT.md`.
 
+## M4: Excel and analytics
+
+### Excel export
+- **Date-range filter** in both the Admin and COO exports. A log is included when its start-end work period overlaps the selected dates at all, so logs that run across the edge of the range are no longer dropped. (F-23)
+- **The COO export now has the same filters as the Admin export:** project, discipline, Head and date range. It opens in a dialog. (F-23)
+- **New column layout:**
+  - Head ID, Head Name and Head Discipline
+  - Project, Task ID, Task and Discipline
+  - Assigned To
+  - Entry Type and Revision Tag (R1, R2...) as separate columns
+  - Start/End dates, Status, **Progress %**, Notes and Submitted At
+- **"(Hidden)" and "(Deleted)" labels** on projects, tasks and disciplines. Those rows are shown in grey and are never dropped from the report.
+- A new **"Report Info" sheet** records the filters used, the date rule, the row count, when the report was generated and by whom. The copyright line moved there, out of the data sheets.
+- Sheet names are made safe for Excel: characters Excel forbids are replaced, names are cut to 31 characters, and duplicates are numbered.
+- **Faster:** the workbook is written in streaming mode, and only header and grey rows are styled. 15,000 logs now take about 9 seconds instead of about 50, and 20,000 logs about 14 seconds. Exports still run on their own server thread.
+
+### Analytics and timeline
+- **The project numbers were wrong and are now correct.** Each total is counted on its own, so totals are no longer multiplied by the number of tasks in a project. (F-15)
+- Project breakdown: task status now means the stage of each task's most recent log (Done / In Progress / Hold / Revision / Not Started). Deleted and hidden items don't count.
+- **Project timeline:** two database queries instead of two per task. Progress uses the latest log's percentage, and "Done" counts as 100%. (F-28)
+
+### Tests
+- `tests/test_reports.py` checks:
+  - export sheets, headers, labels, revision tags, percentages and the info sheet
+  - every filter, including the date-overlap edges and invalid dates
+  - analytics numbers against hand-counted examples, and the timeline
+  - a timed export of 20,000 logs
+- The headless GUI test now runs an export through the real Admin export panel.
+
 ## M3: Workflows
 
 ### All roles

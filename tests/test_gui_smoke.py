@@ -56,6 +56,20 @@ class TestGuiSmoke(unittest.TestCase):
                 ws.on_add_project()
                 self.assertTrue(await wait_until(lambda: ws.tbl_projects.rowCount() == 3))
                 self.assertEqual(ws.cmb_timeline_prj.count(), 3)  # no duplicates after refreshes
+                # Export through the real panel (file dialog replaced by a capture)
+                import app.ui.export_panel as export_panel
+                saved = []
+                export_panel.save_excel_report = lambda parent, data, name: saved.append((data, name))
+                exp = ws.export_panel
+                self.assertTrue(await wait_until(lambda: exp.cmb_project.count() == 4 and exp.cmb_head.count() == 5))
+                exp.cmb_discipline.setCurrentIndex(exp.cmb_discipline.findData("URB"))
+                self.assertEqual(exp.cmb_head.count(), 3)  # All Heads + the two URB Heads
+                exp.chk_dates.setChecked(True)
+                self.assertIn("start_date", exp.current_filters())
+                exp.on_export()
+                self.assertTrue(await wait_until(lambda: len(saved) == 1, timeout=30))
+                self.assertTrue(saved[0][0].startswith(b"PK"))  # xlsx is a zip file
+                self.assertIn("URB", saved[0][1])
                 # Soft delete through the same path the Delete button uses (confirmation dialog skipped)
                 server.db.add_task("P3", "T-TMP", "Temporary", "URB")
                 ws.mutate("DELETE_TASK", {"task_id": "T-TMP"}, "deleted")
