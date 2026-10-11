@@ -2,6 +2,28 @@
 
 Finding IDs (F-xx) refer to `AUDIT_REPORT.md`.
 
+## M5: UI/UX polish
+
+### Notifications
+- **One notification bar per window, at the bottom centre.** It floats above the content, takes no layout space and lets clicks pass through to the buttons underneath. Green means success, amber means queued or warning, red means error, and errors stay on screen a little longer. Panels embedded in the Super Admin console share their window's bar. (F-22)
+- **Connection banner:** a red bar under the header in every role's window while the Central Server can't be reached. The Head's version explains that logs are kept on the PC and sent automatically. The Head's sync badge now actually turns red when offline; before, it stayed green.
+
+### Consistency
+- **No emojis or arrow symbols anywhere in the UI.** Arrows became "to", the person icons were removed, and the KPI cards use short text badges. A test now blocks emojis from coming back. (F-26)
+- **Zinc/Purple palette only.** Leftover slate, blue, indigo and cyan colors in the alert modal, footer, KPI cards, timeline and focus borders were replaced. A test checks this as well.
+- "&" in tab and button labels now shows correctly. Before, Qt read it as a keyboard-shortcut marker and showed "Manage Heads _Users".
+- Labels no longer draw dark boxes inside cards. Number fields match the other inputs. KPI cards no longer cut off their numbers, and their badge colors are correct (Qt reads 8-digit hex colors as ARGB, not RGBA).
+- **Head screen:** the header reads "Head: name (ID) - discipline name". The leftover step numbers ("3. Start Date"...) were removed. The discipline tab shows the full discipline name.
+- **COO live feed:** entry types read New / Continuation / Revision (R1), as in the Excel report.
+
+### Preventing double clicks
+- Admin, COO and Super Admin buttons that change data stay disabled until the server answers.
+- The Head's Submit button pauses for 1.5 seconds after each submission.
+
+### Tests
+- `tests/test_ui_static.py` checks for emojis and off-palette colors.
+- The GUI test checks that the notification bar sits at the bottom of the window and that the connection banner appears when offline and hides again on reconnect.
+
 ## M4: Excel and analytics
 
 ### Excel export

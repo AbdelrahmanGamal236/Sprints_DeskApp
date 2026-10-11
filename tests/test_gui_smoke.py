@@ -90,6 +90,16 @@ class TestGuiSmoke(unittest.TestCase):
                 stored = next(l for l in server.db.get_progress_logs() if l["notes"] == "Smoke test log")
                 self.assertEqual(stored["progress_percentage"], 40)
                 self.assertTrue(await wait_until(lambda: "saved on the Central Server" in ws.toast.label.text()))
+                overlay = ws.toast._overlay()
+                self.assertTrue(overlay.isVisible())
+                self.assertGreater(overlay.y(), ws.height() // 2)  # notification bar sits at the bottom
+                # Connection banner appears while offline and disappears on reconnect
+                ws.net_client.connection_status_changed.emit(False, "test")
+                from app.ui.components import ConnectionBanner
+                banner = ws.findChild(ConnectionBanner)
+                self.assertTrue(banner.isVisibleTo(ws))
+                ws.net_client.connection_status_changed.emit(True, "test")
+                self.assertFalse(banner.isVisibleTo(ws))
                 self.assertEqual(ws.sync_service.pending_count(), 0)
                 # Real-time push: a task added by an Admin appears without any manual refresh
                 before = ws.lst_tasks.count()
