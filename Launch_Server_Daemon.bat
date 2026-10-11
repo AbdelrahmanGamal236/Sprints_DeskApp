@@ -1,13 +1,15 @@
 @echo off
-title Central Server Daemon - Offline Task Manager
-if exist "dist\DeskApp\DeskApp.exe" (
-    echo Starting Central Server via Compiled Executable...
-    "dist\DeskApp\DeskApp.exe" --server-only
-) else if exist "DeskApp.exe" (
-    echo Starting Central Server via Local Executable...
-    DeskApp.exe --server-only
+REM Starts the DeskApp Central Server. Keep this window open while people use DeskApp.
+set "HERE=%~dp0"
+cd /d "%HERE%"
+title DeskApp Central Server
+if exist "%HERE%DeskAppServer.exe" (
+    "%HERE%DeskAppServer.exe" %*
+) else if exist "%HERE%dist\DeskApp\DeskAppServer.exe" (
+    "%HERE%dist\DeskApp\DeskAppServer.exe" %*
 ) else (
-    echo Starting Central Server via Python...
-    python.exe main.py --server-only
+    python.exe "%HERE%main.py" --server-only %*
 )
+echo.
+echo The Central Server has stopped.
 pause
