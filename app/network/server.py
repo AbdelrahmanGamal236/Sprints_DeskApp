@@ -392,11 +392,8 @@ class CentralWebSocketServer:
     async def a_reject_proposal(self, ws, session, payload, msg_id):
         _require(payload, "proposal_id", "reason")
         prop = await self.db_call(self.db.reject_task_proposal, payload["proposal_id"], session.user_id, payload["reason"])
-        proposals = await self.db_call(self.db.get_task_proposals)
-        proposer = next((p["proposed_by_id"] for p in proposals if p["proposal_id"] == payload["proposal_id"]), None)
-        prop["proposed_by_id"] = proposer
         await self.broadcast({"type": "TASK_PROPOSAL_DECIDED_EVENT", "proposal": prop},
-                             target_roles=MANAGERS, extra_user_ids=(proposer,))
+                             target_roles=MANAGERS, extra_user_ids=(prop.get("proposed_by_id"),))
         return {"proposal": prop}
 
     @action("GET_TASK_PROPOSALS", roles=(ROLE_HEAD,) + MANAGERS, response_type="TASK_PROPOSALS_RESPONSE")
@@ -422,18 +419,12 @@ class CentralWebSocketServer:
                              target_roles=MANAGERS)
         return {"id": req["request_id"], "request": req}
 
-    async def _date_request_owner(self, request_id: str):
-        reqs = await self.db_call(self.db.get_task_date_change_requests)
-        return next((r["requested_by_id"] for r in reqs if r["request_id"] == request_id), None)
-
     @action("APPROVE_DATE_CHANGE", roles=MANAGERS)
     async def a_approve_date_change(self, ws, session, payload, msg_id):
         _require(payload, "request_id")
         dec = await self.db_call(self.db.approve_task_date_change_request, payload["request_id"], session.user_id)
-        owner = await self._date_request_owner(payload["request_id"])
-        dec["requested_by_id"] = owner
         await self.broadcast({"type": "TASK_DATE_CHANGE_EVENT", "request": dec, "event": "APPROVED"},
-                             target_roles=MANAGERS, extra_user_ids=(owner,))
+                             target_roles=MANAGERS, extra_user_ids=(dec.get("requested_by_id"),))
         await self.refresh_all("DATE_CHANGE_APPROVED")
         return {"request": dec}
 
@@ -442,10 +433,8 @@ class CentralWebSocketServer:
         _require(payload, "request_id", "reason")
         dec = await self.db_call(self.db.reject_task_date_change_request, payload["request_id"],
                                  session.user_id, payload["reason"])
-        owner = await self._date_request_owner(payload["request_id"])
-        dec["requested_by_id"] = owner
         await self.broadcast({"type": "TASK_DATE_CHANGE_EVENT", "request": dec, "event": "REJECTED"},
-                             target_roles=MANAGERS, extra_user_ids=(owner,))
+                             target_roles=MANAGERS, extra_user_ids=(dec.get("requested_by_id"),))
         return {"request": dec}
 
     @action("GET_DATE_CHANGE_REQUESTS", roles=(ROLE_HEAD,) + MANAGERS, response_type="DATE_CHANGE_REQUESTS_RESPONSE")
@@ -557,6 +546,13 @@ class CentralWebSocketServer:
         await self.refresh_all("PROJECT_VISIBILITY_CHANGED")
         return {"project": p}
 
+    @action("DELETE_PROJECT", roles=MANAGERS)
+    async def a_delete_project(self, ws, session, payload, msg_id):
+        _require(payload, "project_id")
+        p = await self.db_call(self.db.delete_project, payload["project_id"], session.user_id)
+        await self.refresh_all("PROJECT_DELETED")
+        return {"project": p}
+
     @action("GET_TASKS", response_type="TASKS_RESPONSE")
     async def a_get_tasks(self, ws, session, payload, msg_id):
         if session.role == ROLE_HEAD:
@@ -603,6 +599,13 @@ class CentralWebSocketServer:
         _require(payload, "task_id")
         t = await self.db_call(self.db.toggle_hide_task, payload["task_id"], payload.get("current_hidden"))
         await self.refresh_all("TASK_VISIBILITY_CHANGED")
+        return {"task": t}
+
+    @action("DELETE_TASK", roles=MANAGERS)
+    async def a_delete_task(self, ws, session, payload, msg_id):
+        _require(payload, "task_id")
+        t = await self.db_call(self.db.delete_task, payload["task_id"], session.user_id)
+        await self.refresh_all("TASK_DELETED")
         return {"task": t}
 
     @action("GET_PROJECT_TIMELINE", response_type="PROJECT_TIMELINE_RESPONSE")

@@ -4,13 +4,13 @@ import secrets
 import uuid
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import contextmanager
 from app.core.config import (
     CENTRAL_DB_PATH, CLIENT_QUEUE_DB_PATH, BACKUPS_DIR, SEED_HEADS_PATH,
     ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN, ALL_ROLES,
-    DEFAULT_DISCIPLINES
+    DEFAULT_DISCIPLINES, PROGRESS_STAGES, ENTRY_TYPE_NEW, ENTRY_TYPE_CONTINUATION, ENTRY_TYPE_REVISION
 )
 from app.core.auth import hash_password, verify_password, needs_rehash, generate_password
 
@@ -18,6 +18,46 @@ from app.core.auth import hash_password, verify_password, needs_rehash, generate
 PASSWORD_MIN_LENGTH = 8
 # Accounts the old code seeded with password == user ID; rotated on first server start
 LEGACY_DEFAULT_PRIVILEGED_IDS = ("superadmin", "admin", "coo")
+
+# Current schema version (PRAGMA user_version); see DBManager._migrate
+SCHEMA_VERSION = 3
+
+ENTRY_TYPES = (ENTRY_TYPE_NEW, ENTRY_TYPE_CONTINUATION, ENTRY_TYPE_REVISION)
+MAX_NAME_LEN = 200
+MAX_NOTES_LEN = 5000
+MAX_REASON_LEN = 1000
+MAX_ASSIGNED_TO_LEN = 100
+
+
+def now_local() -> str:
+    """All timestamps are stored as local time 'YYYY-MM-DD HH:MM:SS'."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_date(value, field: str, required: bool = True):
+    """Validates a 'YYYY-MM-DD' date string; returns it normalized (or None when optional and empty)."""
+    if value is None or str(value).strip() == "":
+        if required:
+            raise ValueError(f"{field} is required.")
+        return None
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"{field} must be a date in YYYY-MM-DD format.")
+
+
+def check_date_order(start, end, what: str = "Start date"):
+    if start and end and start > end:
+        raise ValueError(f"{what} cannot be after the end date.")
+
+
+def clean_text(value, field: str, max_len: int, required: bool = False) -> str:
+    text = "" if value is None else str(value).strip()
+    if required and not text:
+        raise ValueError(f"{field} is required.")
+    if len(text) > max_len:
+        raise ValueError(f"{field} is too long (maximum {max_len} characters).")
+    return text
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +74,29 @@ class DBManager:
         # timeout = busy wait (seconds) when another connection holds the write lock
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def transaction(self):
+        """
+        One atomic write: BEGIN IMMEDIATE takes the write lock up front, so read-check-write sequences
+        (ID generation, revision numbers, approval state) cannot interleave with another writer.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=10, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            yield cursor
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
 
@@ -248,6 +309,10 @@ class DBManager:
             """)
 
             conn.commit()
+            # WAL lets readers (exports, lists) run while a write is in progress; persists in the file
+            conn.execute("PRAGMA journal_mode = WAL")
+
+        self._migrate()
 
         # Seed initial data
         self.seed_disciplines()
@@ -255,6 +320,63 @@ class DBManager:
         self.seed_heads_from_file()
         # One-time credentials created at startup (Super Admin bootstrap / rotated legacy defaults)
         self.bootstrap_credentials = [] if standalone else self.bootstrap_privileged_accounts()
+
+    def _migrate(self):
+        """
+        Ordered, idempotent schema migrations tracked with PRAGMA user_version.
+        The CREATE TABLE / ADD COLUMN block in init_db is the baseline (version 0/1); each step below
+        runs once, inside its own transaction, and checks before it changes anything.
+        """
+        with self.get_connection() as conn:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
+            return
+
+        def columns(cursor, table):
+            cursor.execute(f"PRAGMA table_info({table})")
+            return {c["name"] for c in cursor.fetchall()}
+
+        if version < 2:
+            # Soft delete for projects and tasks + indexes for the common filters
+            with self.transaction() as cur:
+                for table in ("projects", "tasks"):
+                    cols = columns(cur, table)
+                    if "is_deleted" not in cols:
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+                    if "deleted_at" not in cols:
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN deleted_at TEXT")
+                    if "deleted_by" not in cols:
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN deleted_by TEXT")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_task ON progress_logs(task_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_employee ON progress_logs(employee_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_submitted ON progress_logs(submitted_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, discipline_id)")
+                cur.execute("PRAGMA user_version = 2")
+            logger.info("Database migrated to schema version 2 (soft delete, indexes).")
+
+        if version < 3:
+            # progress_logs.submitted_at used to be written with SQLite CURRENT_TIMESTAMP (UTC), while every
+            # other timestamp is local time. Convert the old rows once so all times are local.
+            with self.transaction() as cur:
+                cur.execute("SELECT log_id, submitted_at FROM progress_logs")
+                converted = 0
+                for row in cur.fetchall():
+                    try:
+                        utc = datetime.strptime(str(row["submitted_at"])[:19], "%Y-%m-%d %H:%M:%S")
+                    except (TypeError, ValueError):
+                        continue
+                    local = utc.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                    cur.execute("UPDATE progress_logs SET submitted_at = ? WHERE log_id = ?", (local, row["log_id"]))
+                    converted += 1
+                cur.execute("PRAGMA user_version = 3")
+            logger.info("Database migrated to schema version 3 (%d log timestamps converted to local time).", converted)
+
+        with self.get_connection() as conn:
+            orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if orphans:
+            # Old rows that reference missing users/projects/tasks are kept (never deleted), only reported.
+            logger.warning("Database contains %d rows with dangling references (kept as-is): %s",
+                           len(orphans), sorted({r[0] for r in orphans}))
 
     def bootstrap_privileged_accounts(self) -> list[tuple[str, str]]:
         """
@@ -382,6 +504,7 @@ class DBManager:
             return
 
         seen_ids = set()
+        known_disciplines = {d["discipline_id"] for d in self.get_disciplines(include_hidden=True)}
         with self.get_connection() as conn:
             cursor = conn.cursor()
             for entry in heads_list:
@@ -399,6 +522,11 @@ class DBManager:
                     continue
                 seen_ids.add(user_id)
 
+                if discipline_id not in known_disciplines:
+                    logger.warning(f"Skipping seed head '{user_id}': unknown discipline '{discipline_id}'. "
+                                   f"Valid codes: {', '.join(sorted(known_disciplines))}")
+                    continue
+
                 # Check if user already exists in DB (idempotent, never overwrite)
                 cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
                 if cursor.fetchone():
@@ -410,13 +538,6 @@ class DBManager:
                 INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password, discipline_id)
                 VALUES (?, ?, ?, ?, ?, 1, ?)
                 """, (user_id, full_name, pwd_hash, pwd_salt, ROLE_HEAD, discipline_id))
-
-                # Auto-assign to all active projects
-                cursor.execute("SELECT project_id FROM projects WHERE is_hidden = 0")
-                projects = cursor.fetchall()
-                for prj in projects:
-                    cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)",
-                                   (user_id, prj["project_id"]))
 
                 logger.info(f"Successfully seeded Head: '{user_id}' ({full_name}) - Discipline: '{discipline_id}'")
 
@@ -493,6 +614,13 @@ class DBManager:
         return {"discipline_id": discipline_id, "is_hidden": new_hidden}
 
     # ------------------- USERS & AUTH API -------------------
+    def _require_discipline(self, discipline_id: str):
+        if not discipline_id:
+            raise ValueError("Discipline is required for HEAD accounts.")
+        with self.get_connection() as conn:
+            if not conn.execute("SELECT 1 FROM disciplines WHERE discipline_id = ?", (discipline_id,)).fetchone():
+                raise ValueError(f"Unknown discipline '{discipline_id}'.")
+
     def get_user(self, user_id: str) -> dict | None:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -543,6 +671,8 @@ class DBManager:
             raise ValueError("User ID and Full Name are required.")
         if role != ROLE_HEAD:
             discipline_id = None
+        else:
+            self._require_discipline(discipline_id)
         pwd_hash, pwd_salt = hash_password(user_id) # initial password = user_id
 
         with self.get_connection() as conn:
@@ -555,14 +685,6 @@ class DBManager:
             INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password, discipline_id)
             VALUES (?, ?, ?, ?, ?, 1, ?)
             """, (user_id, full_name, pwd_hash, pwd_salt, role, discipline_id))
-
-            # Auto-assign Head to all active projects
-            if role == ROLE_HEAD:
-                cursor.execute("SELECT project_id FROM projects WHERE is_hidden = 0")
-                projects = cursor.fetchall()
-                for prj in projects:
-                    cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)",
-                                   (user_id, prj["project_id"]))
 
             conn.commit()
 
@@ -582,6 +704,8 @@ class DBManager:
 
         new_full_name = full_name.strip() if full_name is not None else target["full_name"]
         new_discipline_id = discipline_id if discipline_id is not None else target["discipline_id"]
+        if (role or target["role"]) == ROLE_HEAD:
+            self._require_discipline(new_discipline_id)
         new_role = role if role is not None else target["role"]
 
         if actor_role == ROLE_ADMIN and new_role != ROLE_HEAD:
@@ -705,48 +829,59 @@ class DBManager:
         return user
 
     # ------------------- PROJECTS API -------------------
-    def get_projects(self, include_hidden: bool = False) -> list[dict]:
+    def get_projects(self, include_hidden: bool = False, include_deleted: bool = False) -> list[dict]:
+        query = "SELECT * FROM projects WHERE 1=1"
+        if not include_deleted:
+            query += " AND is_deleted = 0"
+        if not include_hidden:
+            query += " AND is_hidden = 0"
         with self.get_connection() as conn:
-            cursor = conn.cursor()
-            if include_hidden:
-                cursor.execute("SELECT * FROM projects ORDER BY project_id ASC")
-            else:
-                cursor.execute("SELECT * FROM projects WHERE is_hidden = 0 ORDER BY project_id ASC")
-            return [dict(r) for r in cursor.fetchall()]
+            return [dict(r) for r in conn.execute(query + " ORDER BY project_id ASC").fetchall()]
+
+    @staticmethod
+    def _project_row(cursor, project_id: str):
+        cursor.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
+        row = cursor.fetchone()
+        if not row or row["is_deleted"]:
+            raise ValueError(f"Project '{project_id}' does not exist.")
+        return row
 
     def add_project(self, project_id: str, name: str, description: str = "") -> dict:
-        project_id = project_id.strip()
-        name = name.strip()
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
-            if cursor.fetchone():
-                raise ValueError(f"Project ID '{project_id}' already exists.")
-            cursor.execute("INSERT INTO projects (project_id, name, description) VALUES (?, ?, ?)",
-                           (project_id, name, description))
-            
-            # Auto-assign all active HEADs to project
-            cursor.execute("SELECT user_id FROM users WHERE role = 'HEAD'")
-            for h in cursor.fetchall():
-                cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)",
-                               (h["user_id"], project_id))
-            conn.commit()
+        project_id = clean_text(project_id, "Project ID", 50, required=True)
+        name = clean_text(name, "Project name", MAX_NAME_LEN, required=True)
+        description = clean_text(description, "Description", MAX_NOTES_LEN)
+        with self.transaction() as cur:
+            cur.execute("SELECT is_deleted FROM projects WHERE project_id = ?", (project_id,))
+            row = cur.fetchone()
+            if row:
+                hint = " (a deleted project keeps its ID)" if row["is_deleted"] else ""
+                raise ValueError(f"Project ID '{project_id}' already exists{hint}.")
+            cur.execute("INSERT INTO projects (project_id, name, description) VALUES (?, ?, ?)",
+                        (project_id, name, description))
         return {"project_id": project_id, "name": name, "description": description}
 
     def toggle_hide_project(self, project_id: str, current_hidden: int) -> dict:
         new_hidden = 0 if current_hidden else 1
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE projects SET is_hidden = ? WHERE project_id = ?", (new_hidden, project_id))
-            conn.commit()
+        with self.transaction() as cur:
+            self._project_row(cur, project_id)
+            cur.execute("UPDATE projects SET is_hidden = ? WHERE project_id = ?", (new_hidden, project_id))
         return {"project_id": project_id, "is_hidden": new_hidden}
 
+    def delete_project(self, project_id: str, actor_id: str) -> dict:
+        """Soft delete: disappears from every screen; the row, its tasks and all logs stay in the database."""
+        with self.transaction() as cur:
+            self._project_row(cur, project_id)
+            cur.execute("UPDATE projects SET is_deleted = 1, deleted_at = ?, deleted_by = ? WHERE project_id = ?",
+                        (now_local(), actor_id, project_id))
+        return {"project_id": project_id, "is_deleted": 1}
+
     # ------------------- TASKS API -------------------
-    def get_tasks(self, project_id: str = None, discipline_id: str = None, assigned_head_id: str = None, include_hidden: bool = False) -> list[dict]:
+    def get_tasks(self, project_id: str = None, discipline_id: str = None, assigned_head_id: str = None,
+                  include_hidden: bool = False, include_deleted: bool = False) -> list[dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             query = """
-            SELECT t.*, p.name AS project_name, u.full_name AS proposer_name,
+            SELECT t.*, p.name AS project_name, p.is_hidden AS project_hidden, u.full_name AS proposer_name,
                    d.name AS discipline_name,
                    uh.full_name AS assigned_head_name
             FROM tasks t
@@ -757,6 +892,8 @@ class DBManager:
             WHERE 1=1
             """
             params = []
+            if not include_deleted:
+                query += " AND t.is_deleted = 0 AND COALESCE(p.is_deleted, 0) = 0"
             if not include_hidden:
                 query += " AND t.is_hidden = 0"
             if project_id:
@@ -772,96 +909,99 @@ class DBManager:
             cursor.execute(query, tuple(params))
             return [dict(r) for r in cursor.fetchall()]
 
+    @staticmethod
+    def _task_row(cursor, task_id: str):
+        cursor.execute("""SELECT t.*, p.is_hidden AS project_hidden, p.is_deleted AS project_deleted
+                          FROM tasks t LEFT JOIN projects p ON t.project_id = p.project_id WHERE t.task_id = ?""",
+                       (task_id,))
+        row = cursor.fetchone()
+        if not row or row["is_deleted"] or row["project_deleted"]:
+            raise ValueError(f"Task '{task_id}' does not exist.")
+        return row
+
+    @staticmethod
+    def _next_task_id(cursor) -> str:
+        """Next free TSK-NN number. Must be called inside a transaction (BEGIN IMMEDIATE)."""
+        cursor.execute("SELECT task_id FROM tasks WHERE task_id LIKE 'TSK-%'")
+        max_num = 0
+        for row in cursor.fetchall():
+            try:
+                max_num = max(max_num, int(row["task_id"].split("-", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+        return f"TSK-{max_num + 1:02d}"
+
+    def _validate_task_fields(self, cursor, discipline_id, assigned_head_id, start, end):
+        cursor.execute("SELECT 1 FROM disciplines WHERE discipline_id = ?", (discipline_id,))
+        if not cursor.fetchone():
+            raise ValueError(f"Unknown discipline '{discipline_id}'.")
+        check_date_order(start, end, "Planned start date")
+        if assigned_head_id:
+            cursor.execute("SELECT role, discipline_id FROM users WHERE user_id = ?", (assigned_head_id,))
+            head = cursor.fetchone()
+            if not head or head["role"] != ROLE_HEAD:
+                raise ValueError(f"'{assigned_head_id}' is not a Head account.")
+            if head["discipline_id"] != discipline_id:
+                raise ValueError(f"Head '{assigned_head_id}' does not belong to discipline '{discipline_id}'.")
+
     def add_task(self, project_id: str, task_id: str = None, name: str = "", discipline_id: str = None,
                  planned_start_date: str = "", planned_end_date: str = "", description: str = "",
                  proposed_by_id: str = None, assigned_head_id: str = None) -> dict:
-        project_id = (project_id or "").strip()
-        task_id = (task_id or "").strip()
-        name = (name or "").strip()
-        discipline_id = discipline_id.strip() if discipline_id else None
-        assigned_head_id = assigned_head_id.strip() if assigned_head_id else None
-
+        project_id = clean_text(project_id, "Project", 50, required=True)
+        task_id = clean_text(task_id, "Task ID", 50)
+        name = clean_text(name, "Task name", MAX_NAME_LEN, required=True)
+        description = clean_text(description, "Description", MAX_NOTES_LEN)
+        discipline_id = clean_text(discipline_id, "Discipline", 50)
         if not discipline_id:
             raise ValueError("Discipline is required when creating a task.")
+        assigned_head_id = clean_text(assigned_head_id, "Assigned Head", 50) or None
+        today = datetime.now()
+        start = parse_date(planned_start_date, "Planned start date", required=False) or today.strftime("%Y-%m-%d")
+        end = parse_date(planned_end_date, "Planned end date", required=False) or (today + timedelta(days=7)).strftime("%Y-%m-%d")
 
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        if not planned_start_date:
-            planned_start_date = today_str
-        if not planned_end_date:
-            from datetime import timedelta
-            planned_end_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-
-        # If task_id is omitted or starts with MSG- (correlation ID artifact), auto-generate clean task_id
-        if not task_id or task_id.lower() in ("none", "null", "undefined") or task_id.startswith("MSG-"):
-            task_id = self.generate_next_task_id(project_id)
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Prevent any duplicate task_id collision by auto-incrementing if ID exists
-            while True:
-                cursor.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,))
-                if not cursor.fetchone():
-                    break
-                try:
-                    num_part = int(task_id.split("-")[1])
-                    task_id = f"TSK-{num_part + 1:02d}"
-                except Exception:
-                    task_id = self.generate_next_task_id(project_id)
-
-            cursor.execute("""
-            INSERT INTO tasks (
-                task_id, project_id, name, description, is_hidden,
-                proposed_by_id, discipline_id, planned_start_date,
-                planned_end_date, assigned_head_id
-            )
+        with self.transaction() as cur:
+            self._project_row(cur, project_id)
+            self._validate_task_fields(cur, discipline_id, assigned_head_id, start, end)
+            if task_id:
+                cur.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,))
+                if cur.fetchone():
+                    raise ValueError(f"Task ID '{task_id}' already exists.")
+            else:
+                task_id = self._next_task_id(cur)
+            cur.execute("""
+            INSERT INTO tasks (task_id, project_id, name, description, is_hidden, proposed_by_id,
+                               discipline_id, planned_start_date, planned_end_date, assigned_head_id)
             VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-            """, (task_id, project_id, name, description, proposed_by_id,
-                  discipline_id, planned_start_date, planned_end_date, assigned_head_id))
-
-            # Ensure assigned head has access to the project
-            if assigned_head_id and project_id:
-                cursor.execute("""
-                INSERT OR IGNORE INTO employee_projects (employee_id, project_id)
-                VALUES (?, ?)
-                """, (assigned_head_id, project_id))
-
-            conn.commit()
+            """, (task_id, project_id, name, description, proposed_by_id, discipline_id, start, end, assigned_head_id))
 
         return {
             "task_id": task_id, "project_id": project_id, "name": name,
-            "discipline_id": discipline_id, "planned_start_date": planned_start_date,
-            "planned_end_date": planned_end_date, "proposed_by_id": proposed_by_id,
+            "discipline_id": discipline_id, "planned_start_date": start,
+            "planned_end_date": end, "proposed_by_id": proposed_by_id,
             "assigned_head_id": assigned_head_id
         }
 
     def update_task(self, task_id: str, name: str = None, discipline_id: str = None,
                     assigned_head_id = ..., planned_start_date: str = None,
                     planned_end_date: str = None, description: str = None) -> dict:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
-            current = cursor.fetchone()
-            if not current:
-                raise ValueError(f"Task '{task_id}' not found.")
-
-            new_name = name.strip() if name is not None else current["name"]
-            new_disc = discipline_id.strip() if discipline_id is not None else current["discipline_id"]
+        with self.transaction() as cur:
+            current = self._task_row(cur, task_id)
+            new_name = clean_text(name, "Task name", MAX_NAME_LEN, required=True) if name is not None else current["name"]
+            new_disc = clean_text(discipline_id, "Discipline", 50, required=True) if discipline_id is not None else current["discipline_id"]
             if assigned_head_id is not ...:
-                new_head = assigned_head_id.strip() if (assigned_head_id and str(assigned_head_id).strip()) else None
+                new_head = str(assigned_head_id).strip() if (assigned_head_id and str(assigned_head_id).strip()) else None
             else:
                 new_head = current["assigned_head_id"]
-            new_start = planned_start_date if planned_start_date is not None else current["planned_start_date"]
-            new_end = planned_end_date if planned_end_date is not None else current["planned_end_date"]
-            new_desc = description if description is not None else current["description"]
-
-            cursor.execute("""
+            new_start = parse_date(planned_start_date, "Planned start date") if planned_start_date is not None else current["planned_start_date"]
+            new_end = parse_date(planned_end_date, "Planned end date") if planned_end_date is not None else current["planned_end_date"]
+            new_desc = clean_text(description, "Description", MAX_NOTES_LEN) if description is not None else current["description"]
+            self._validate_task_fields(cur, new_disc, new_head, new_start, new_end)
+            cur.execute("""
             UPDATE tasks
             SET name = ?, discipline_id = ?, assigned_head_id = ?,
                 planned_start_date = ?, planned_end_date = ?, description = ?
             WHERE task_id = ?
             """, (new_name, new_disc, new_head, new_start, new_end, new_desc, task_id))
-            conn.commit()
 
         return {
             "task_id": task_id, "name": new_name, "discipline_id": new_disc,
@@ -870,130 +1010,122 @@ class DBManager:
         }
 
     def update_task_dates(self, task_id: str, planned_start_date: str, planned_end_date: str) -> dict:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            UPDATE tasks SET planned_start_date = ?, planned_end_date = ? WHERE task_id = ?
-            """, (planned_start_date, planned_end_date, task_id))
-            conn.commit()
-        return {"task_id": task_id, "planned_start_date": planned_start_date, "planned_end_date": planned_end_date}
+        start = parse_date(planned_start_date, "Planned start date")
+        end = parse_date(planned_end_date, "Planned end date")
+        check_date_order(start, end, "Planned start date")
+        with self.transaction() as cur:
+            self._task_row(cur, task_id)
+            cur.execute("UPDATE tasks SET planned_start_date = ?, planned_end_date = ? WHERE task_id = ?",
+                        (start, end, task_id))
+        return {"task_id": task_id, "planned_start_date": start, "planned_end_date": end}
 
     def toggle_hide_task(self, task_id: str, current_hidden: int) -> dict:
         new_hidden = 0 if current_hidden else 1
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE tasks SET is_hidden = ? WHERE task_id = ?", (new_hidden, task_id))
-            conn.commit()
+        with self.transaction() as cur:
+            self._task_row(cur, task_id)
+            cur.execute("UPDATE tasks SET is_hidden = ? WHERE task_id = ?", (new_hidden, task_id))
         return {"task_id": task_id, "is_hidden": new_hidden}
 
-    def generate_next_task_id(self, project_id: str = None) -> str:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT task_id FROM tasks WHERE task_id LIKE 'TSK-%'")
-            t_ids = [row["task_id"] for row in cursor.fetchall() if row["task_id"]]
-            cursor.execute("SELECT task_id FROM task_proposals WHERE task_id LIKE 'TSK-%'")
-            p_ids = [row["task_id"] for row in cursor.fetchall() if row["task_id"]]
+    def delete_task(self, task_id: str, actor_id: str) -> dict:
+        """Soft delete: disappears from every screen; the task row and all its logs stay in the database."""
+        with self.transaction() as cur:
+            self._task_row(cur, task_id)
+            cur.execute("UPDATE tasks SET is_deleted = 1, deleted_at = ?, deleted_by = ? WHERE task_id = ?",
+                        (now_local(), actor_id, task_id))
+        return {"task_id": task_id, "is_deleted": 1}
 
-            max_num = 0
-            for tid in t_ids + p_ids:
-                try:
-                    num_part = int(tid.split("-")[1])
-                    if num_part > max_num:
-                        max_num = num_part
-                except (IndexError, ValueError):
-                    continue
-            return f"TSK-{max_num + 1:02d}"
+    def generate_next_task_id(self, project_id: str = None) -> str:
+        """Preview of the next task ID (the real one is assigned atomically when the task is inserted)."""
+        with self.get_connection() as conn:
+            return self._next_task_id(conn.cursor())
 
     # ------------------- TASK PROPOSALS API -------------------
     def create_task_proposal(self, project_id: str, task_name: str, proposed_by_id: str,
                              discipline_id: str = None, planned_start_date: str = None,
                              planned_end_date: str = None, proposal_id: str = None) -> dict:
-        if not proposal_id:
-            proposal_id = f"PROP-{uuid.uuid4().hex[:8].upper()}"
-        task_id = self.generate_next_task_id(project_id)
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # If discipline_id not passed, fetch from proposer user
+        proposal_id = proposal_id or f"PROP-{uuid.uuid4().hex.upper()}"
+        task_name = clean_text(task_name, "Task name", MAX_NAME_LEN, required=True)
+        start = parse_date(planned_start_date, "Planned start date", required=False)
+        end = parse_date(planned_end_date, "Planned end date", required=False)
+        check_date_order(start, end, "Planned start date")
         if not discipline_id:
             u = self.get_user(proposed_by_id)
-            if u:
-                discipline_id = u["discipline_id"]
+            discipline_id = u["discipline_id"] if u else None
+        now_str = now_local()
 
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            # Idempotency check
-            cursor.execute("SELECT * FROM task_proposals WHERE proposal_id = ?", (proposal_id,))
-            existing = cursor.fetchone()
-            if existing:
+        with self.transaction() as cur:
+            cur.execute("SELECT * FROM task_proposals WHERE proposal_id = ?", (proposal_id,))
+            existing = cur.fetchone()
+            if existing:  # idempotent resend from the offline queue
                 return dict(existing)
-
-            cursor.execute("""
-            INSERT INTO task_proposals (proposal_id, task_id, project_id, task_name, proposed_by_id, discipline_id, planned_start_date, planned_end_date, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
-            """, (proposal_id, task_id, project_id, task_name, proposed_by_id, discipline_id, planned_start_date, planned_end_date, now_str))
-            conn.commit()
+            prj = self._project_row(cur, project_id)
+            if prj["is_hidden"]:
+                raise ValueError(f"Project '{project_id}' is not active.")
+            # The task ID is assigned at approval time, not reserved here
+            cur.execute("""
+            INSERT INTO task_proposals (proposal_id, task_id, project_id, task_name, proposed_by_id, discipline_id,
+                                        planned_start_date, planned_end_date, status, created_at)
+            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+            """, (proposal_id, project_id, task_name, proposed_by_id, discipline_id, start, end, now_str))
 
         return {
-            "proposal_id": proposal_id, "task_id": task_id, "project_id": project_id,
+            "proposal_id": proposal_id, "task_id": None, "project_id": project_id,
             "task_name": task_name, "proposed_by_id": proposed_by_id, "discipline_id": discipline_id,
-            "planned_start_date": planned_start_date, "planned_end_date": planned_end_date,
+            "planned_start_date": start, "planned_end_date": end,
             "status": "PENDING", "created_at": now_str
         }
 
     def approve_task_proposal(self, proposal_id: str, admin_id: str) -> dict:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM task_proposals WHERE proposal_id = ?", (proposal_id,))
-            prop = cursor.fetchone()
+        now_str = now_local()
+        with self.transaction() as cur:
+            cur.execute("SELECT * FROM task_proposals WHERE proposal_id = ?", (proposal_id,))
+            prop = cur.fetchone()
             if not prop:
                 raise ValueError(f"Proposal '{proposal_id}' not found.")
-
-            task_id = prop["task_id"]
-            cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
-            if cursor.fetchone():
-                task_id = self.generate_next_task_id(prop["project_id"])
+            if prop["status"] == "APPROVED":  # repeated click / resend: no second task
+                return dict(prop)
+            if prop["status"] != "PENDING":
+                raise ValueError(f"Proposal was already {prop['status'].lower()}.")
+            self._project_row(cur, prop["project_id"])
 
             today_str = datetime.now().strftime("%Y-%m-%d")
             p_start = prop["planned_start_date"] or today_str
-            p_end = prop["planned_end_date"] or today_str
-
-            cursor.execute("""
-            INSERT OR IGNORE INTO tasks (task_id, project_id, name, is_hidden, proposed_by_id, discipline_id, planned_start_date, planned_end_date)
+            p_end = prop["planned_end_date"] or p_start
+            task_id = self._next_task_id(cur)
+            cur.execute("""
+            INSERT INTO tasks (task_id, project_id, name, is_hidden, proposed_by_id, discipline_id,
+                               planned_start_date, planned_end_date)
             VALUES (?, ?, ?, 0, ?, ?, ?, ?)
-            """, (task_id, prop["project_id"], prop["task_name"], prop["proposed_by_id"], prop["discipline_id"], p_start, p_end))
-
-            cursor.execute("""
-            UPDATE task_proposals 
-            SET status = 'APPROVED', admin_id = ?, decided_at = ?, task_id = ?
+            """, (task_id, prop["project_id"], prop["task_name"], prop["proposed_by_id"], prop["discipline_id"],
+                  p_start, p_end))
+            cur.execute("""
+            UPDATE task_proposals SET status = 'APPROVED', admin_id = ?, decided_at = ?, task_id = ?
             WHERE proposal_id = ?
             """, (admin_id, now_str, task_id, proposal_id))
-            conn.commit()
 
-        return {
-            "proposal_id": proposal_id, "task_id": task_id, "project_id": prop["project_id"],
-            "task_name": prop["task_name"], "proposed_by_id": prop["proposed_by_id"],
-            "discipline_id": prop["discipline_id"], "status": "APPROVED",
-            "admin_id": admin_id, "decided_at": now_str
-        }
+        result = dict(prop)
+        result.update({"task_id": task_id, "status": "APPROVED", "admin_id": admin_id, "decided_at": now_str})
+        return result
 
     def reject_task_proposal(self, proposal_id: str, admin_id: str, reason: str) -> dict:
-        if not reason or not reason.strip():
-            raise ValueError("Rejection reason is mandatory.")
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            UPDATE task_proposals 
-            SET status = 'REJECTED', admin_id = ?, rejection_reason = ?, decided_at = ?
+        reason = clean_text(reason, "Rejection reason", MAX_REASON_LEN, required=True)
+        now_str = now_local()
+        with self.transaction() as cur:
+            cur.execute("SELECT * FROM task_proposals WHERE proposal_id = ?", (proposal_id,))
+            prop = cur.fetchone()
+            if not prop:
+                raise ValueError(f"Proposal '{proposal_id}' not found.")
+            if prop["status"] == "REJECTED":
+                return dict(prop)
+            if prop["status"] != "PENDING":
+                raise ValueError(f"Proposal was already {prop['status'].lower()}.")
+            cur.execute("""
+            UPDATE task_proposals SET status = 'REJECTED', admin_id = ?, rejection_reason = ?, decided_at = ?
             WHERE proposal_id = ?
-            """, (admin_id, reason.strip(), now_str, proposal_id))
-            conn.commit()
-
-        return {
-            "proposal_id": proposal_id, "status": "REJECTED", "admin_id": admin_id,
-            "rejection_reason": reason.strip(), "decided_at": now_str
-        }
+            """, (admin_id, reason, now_str, proposal_id))
+        result = dict(prop)
+        result.update({"status": "REJECTED", "admin_id": admin_id, "rejection_reason": reason, "decided_at": now_str})
+        return result
 
     def get_task_proposals(self, project_id: str = None, proposed_by_id: str = None, status: str = None) -> list[dict]:
         with self.get_connection() as conn:
@@ -1026,85 +1158,75 @@ class DBManager:
     def create_task_date_change_request(self, task_id: str, requested_by_id: str,
                                         new_start_date: str, new_end_date: str,
                                         reason: str, request_id: str = None) -> dict:
-        if not reason or not reason.strip():
-            raise ValueError("Reason for date change is mandatory.")
-        if not request_id:
-            request_id = f"DCR-{uuid.uuid4().hex[:8].upper()}"
+        reason = clean_text(reason, "Reason for date change", MAX_REASON_LEN, required=True)
+        start = parse_date(new_start_date, "New start date")
+        end = parse_date(new_end_date, "New end date")
+        check_date_order(start, end, "New start date")
+        request_id = request_id or f"DCR-{uuid.uuid4().hex.upper()}"
+        now_str = now_local()
 
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            # Idempotency check
-            cursor.execute("SELECT * FROM task_date_change_requests WHERE request_id = ?", (request_id,))
-            existing = cursor.fetchone()
-            if existing:
+        with self.transaction() as cur:
+            cur.execute("SELECT * FROM task_date_change_requests WHERE request_id = ?", (request_id,))
+            existing = cur.fetchone()
+            if existing:  # idempotent resend
                 return dict(existing)
-
-            cursor.execute("SELECT planned_start_date, planned_end_date FROM tasks WHERE task_id = ?", (task_id,))
-            task_row = cursor.fetchone()
-            old_start = task_row["planned_start_date"] if task_row else None
-            old_end = task_row["planned_end_date"] if task_row else None
-
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute("""
+            task = self._task_row(cur, task_id)
+            cur.execute("""
             INSERT INTO task_date_change_requests (
                 request_id, task_id, requested_by_id, old_start_date, old_end_date,
                 new_start_date, new_end_date, reason, status, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
-            """, (request_id, task_id, requested_by_id, old_start, old_end, new_start_date, new_end_date, reason.strip(), now_str))
-            conn.commit()
+            """, (request_id, task_id, requested_by_id, task["planned_start_date"], task["planned_end_date"],
+                  start, end, reason, now_str))
 
         return {
             "request_id": request_id, "task_id": task_id, "requested_by_id": requested_by_id,
-            "old_start_date": old_start, "old_end_date": old_end,
-            "new_start_date": new_start_date, "new_end_date": new_end_date,
-            "reason": reason.strip(), "status": "PENDING", "created_at": now_str
+            "old_start_date": task["planned_start_date"], "old_end_date": task["planned_end_date"],
+            "new_start_date": start, "new_end_date": end,
+            "reason": reason, "status": "PENDING", "created_at": now_str
         }
 
     def approve_task_date_change_request(self, request_id: str, admin_id: str) -> dict:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM task_date_change_requests WHERE request_id = ?", (request_id,))
-            req = cursor.fetchone()
+        now_str = now_local()
+        with self.transaction() as cur:
+            cur.execute("SELECT * FROM task_date_change_requests WHERE request_id = ?", (request_id,))
+            req = cur.fetchone()
             if not req:
                 raise ValueError(f"Date change request '{request_id}' not found.")
-
-            # Update task dates
-            cursor.execute("""
-            UPDATE tasks SET planned_start_date = ?, planned_end_date = ? WHERE task_id = ?
-            """, (req["new_start_date"], req["new_end_date"], req["task_id"]))
-
-            # Update request status
-            cursor.execute("""
-            UPDATE task_date_change_requests
-            SET status = 'APPROVED', admin_id = ?, decided_at = ?
+            if req["status"] == "APPROVED":
+                return dict(req)
+            if req["status"] != "PENDING":
+                raise ValueError(f"Request was already {req['status'].lower()}.")
+            self._task_row(cur, req["task_id"])
+            cur.execute("UPDATE tasks SET planned_start_date = ?, planned_end_date = ? WHERE task_id = ?",
+                        (req["new_start_date"], req["new_end_date"], req["task_id"]))
+            cur.execute("""
+            UPDATE task_date_change_requests SET status = 'APPROVED', admin_id = ?, decided_at = ?
             WHERE request_id = ?
             """, (admin_id, now_str, request_id))
-            conn.commit()
-
-        return {
-            "request_id": request_id, "task_id": req["task_id"], "status": "APPROVED",
-            "admin_id": admin_id, "new_start_date": req["new_start_date"],
-            "new_end_date": req["new_end_date"], "decided_at": now_str
-        }
+        result = dict(req)
+        result.update({"status": "APPROVED", "admin_id": admin_id, "decided_at": now_str})
+        return result
 
     def reject_task_date_change_request(self, request_id: str, admin_id: str, reason: str) -> dict:
-        if not reason or not reason.strip():
-            raise ValueError("Rejection reason is mandatory.")
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            UPDATE task_date_change_requests
-            SET status = 'REJECTED', admin_id = ?, rejection_reason = ?, decided_at = ?
+        reason = clean_text(reason, "Rejection reason", MAX_REASON_LEN, required=True)
+        now_str = now_local()
+        with self.transaction() as cur:
+            cur.execute("SELECT * FROM task_date_change_requests WHERE request_id = ?", (request_id,))
+            req = cur.fetchone()
+            if not req:
+                raise ValueError(f"Date change request '{request_id}' not found.")
+            if req["status"] == "REJECTED":
+                return dict(req)
+            if req["status"] != "PENDING":
+                raise ValueError(f"Request was already {req['status'].lower()}.")
+            cur.execute("""
+            UPDATE task_date_change_requests SET status = 'REJECTED', admin_id = ?, rejection_reason = ?, decided_at = ?
             WHERE request_id = ?
-            """, (admin_id, reason.strip(), now_str, request_id))
-            conn.commit()
-
-        return {
-            "request_id": request_id, "status": "REJECTED", "admin_id": admin_id,
-            "rejection_reason": reason.strip(), "decided_at": now_str
-        }
+            """, (admin_id, reason, now_str, request_id))
+        result = dict(req)
+        result.update({"status": "REJECTED", "admin_id": admin_id, "rejection_reason": reason, "decided_at": now_str})
+        return result
 
     def get_task_date_change_requests(self, status: str = None, task_id: str = None, requested_by_id: str = None) -> list[dict]:
         with self.get_connection() as conn:
@@ -1136,88 +1258,104 @@ class DBManager:
             return [dict(r) for r in cursor.fetchall()]
 
     # ------------------- PROGRESS LOGS API -------------------
+    @staticmethod
+    def _next_revision(cursor, task_id: str) -> int:
+        """Revision numbers are counted per task (shared by all Heads of the discipline)."""
+        cursor.execute("""SELECT COALESCE(MAX(revision_number), 0) + 1 AS next_rev FROM progress_logs
+                          WHERE task_id = ? AND entry_type = 'REVISION'""", (task_id,))
+        return cursor.fetchone()["next_rev"]
+
     def get_next_revision_number(self, employee_id: str, project_id: str, task_id: str) -> int:
+        """Preview only; the stored number is assigned by the server when the log is saved."""
         with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            SELECT COALESCE(MAX(revision_number), 0) + 1 AS next_rev
-            FROM progress_logs
-            WHERE employee_id = ? AND project_id = ? AND task_id = ? AND entry_type = 'REVISION'
-            """, (employee_id, project_id, task_id))
-            row = cursor.fetchone()
-            return row["next_rev"] if row else 1
+            return self._next_revision(conn.cursor(), task_id)
 
     def submit_progress_log(self, payload: dict) -> dict:
-        log_id = payload.get("log_id") or f"LOG-{uuid.uuid4().hex[:8].upper()}"
+        log_id = clean_text(payload.get("log_id"), "Log ID", 100) or f"LOG-{uuid.uuid4().hex.upper()}"
         employee_id = payload.get("employee_id")
-        project_id = payload.get("project_id")
-        task_id = payload.get("task_id")
-        start_date = payload.get("start_date")
-        end_date = payload.get("end_date")
-        progress_percentage = int(payload.get("progress_percentage", 0))
-        progress_stage = payload.get("progress_stage", "")
-        entry_type = payload.get("entry_type", "NEW")
-        revision_number = int(payload.get("revision_number", 0))
-        notes = payload.get("notes", "")
-        assigned_to = (payload.get("assigned_to") or "").strip()[:100]
+        project_id = clean_text(payload.get("project_id"), "Project", 50, required=True)
+        task_id = clean_text(payload.get("task_id"), "Task", 50, required=True)
+        start_date = parse_date(payload.get("start_date"), "Start date")
+        end_date = parse_date(payload.get("end_date"), "End date")
+        check_date_order(start_date, end_date)
+        progress_stage = clean_text(payload.get("progress_stage"), "Progress stage", 50, required=True)
+        if progress_stage not in PROGRESS_STAGES:
+            raise ValueError(f"Progress stage must be one of: {', '.join(PROGRESS_STAGES)}.")
+        entry_type = (payload.get("entry_type") or ENTRY_TYPE_NEW).upper()
+        if entry_type not in ENTRY_TYPES:
+            raise ValueError(f"Entry type must be one of: {', '.join(ENTRY_TYPES)}.")
+        try:
+            progress_percentage = int(payload.get("progress_percentage") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Progress percentage must be a whole number between 0 and 100.")
+        if not 0 <= progress_percentage <= 100:
+            raise ValueError("Progress percentage must be between 0 and 100.")
+        notes = clean_text(payload.get("notes"), "Notes", MAX_NOTES_LEN)
+        assigned_to = clean_text(payload.get("assigned_to"), "Assigned To", MAX_ASSIGNED_TO_LEN)
 
-        # Verify discipline rules if employee is HEAD
         emp = self.get_user(employee_id)
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT discipline_id, assigned_head_id FROM tasks WHERE task_id = ?", (task_id,))
-            task_row = cursor.fetchone()
-            task_discipline = task_row["discipline_id"] if task_row else None
-            task_assigned_head = task_row["assigned_head_id"] if task_row else None
+        if not emp:
+            raise ValueError(f"Unknown employee '{employee_id}'.")
 
-            if emp and emp["role"] == ROLE_HEAD:
+        with self.transaction() as cur:
+            # Idempotent write: a resend of an already stored log returns the stored row
+            cur.execute("SELECT * FROM progress_logs WHERE log_id = ?", (log_id,))
+            existing = cur.fetchone()
+            if existing:
+                if existing["employee_id"] != employee_id:
+                    raise ValueError("Log ID conflict. Please submit the log again.")
+                return dict(existing)
+
+            task = self._task_row(cur, task_id)
+            if task["project_id"] != project_id:
+                raise ValueError(f"Task '{task_id}' does not belong to project '{project_id}'.")
+            if task["is_hidden"] or task["project_hidden"]:
+                raise ValueError(f"Task '{task_id}' is no longer active (hidden by the Admin).")
+
+            if emp["role"] == ROLE_HEAD:
                 head_discipline = emp["discipline_id"]
                 if not head_discipline:
                     raise PermissionError(f"Employee '{employee_id}' has no assigned discipline.")
-                if task_discipline and task_discipline != head_discipline:
-                    raise PermissionError(f"Discipline mismatch: Head belongs to '{head_discipline}' but task belongs to '{task_discipline}'.")
-                if task_assigned_head and task_assigned_head != employee_id:
-                    raise PermissionError(f"Task '{task_id}' is specifically assigned to Head '{task_assigned_head}'.")
+                if task["discipline_id"] and task["discipline_id"] != head_discipline:
+                    raise PermissionError(f"Discipline mismatch: Head belongs to '{head_discipline}' but task belongs to '{task['discipline_id']}'.")
+                if task["assigned_head_id"] and task["assigned_head_id"] != employee_id:
+                    raise PermissionError(f"Task '{task_id}' is specifically assigned to Head '{task['assigned_head_id']}'.")
 
-            # Store employee's active discipline (or task's discipline)
-            log_discipline = (emp["discipline_id"] if emp and emp.get("discipline_id") else task_discipline)
-
-            # Idempotent write: ignore if log_id already exists
-            cursor.execute("SELECT * FROM progress_logs WHERE log_id = ?", (log_id,))
-            existing = cursor.fetchone()
-            if existing:
-                return dict(existing)
-
-            cursor.execute("""
+            log_discipline = emp["discipline_id"] or task["discipline_id"]
+            # Revision number assigned here, inside the write transaction, never taken from the client
+            revision_number = self._next_revision(cur, task_id) if entry_type == ENTRY_TYPE_REVISION else 0
+            submitted_at = now_local()
+            cur.execute("""
             INSERT INTO progress_logs (
                 log_id, employee_id, project_id, task_id, start_date, end_date,
                 progress_percentage, progress_stage, entry_type, revision_number,
                 notes, discipline_id, assigned_to, submitted_at, sync_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'SYNCED')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SYNCED')
             """, (log_id, employee_id, project_id, task_id, start_date, end_date,
                   progress_percentage, progress_stage, entry_type, revision_number,
-                  notes, log_discipline, assigned_to))
-            conn.commit()
+                  notes, log_discipline, assigned_to, submitted_at))
 
         return {
-            "log_id": log_id, "employee_id": employee_id, "project_id": project_id,
-            "task_id": task_id, "start_date": start_date, "end_date": end_date,
+            "log_id": log_id, "employee_id": employee_id, "employee_name": emp.get("full_name"),
+            "project_id": project_id, "task_id": task_id, "task_name": task["name"],
+            "start_date": start_date, "end_date": end_date,
             "progress_percentage": progress_percentage, "progress_stage": progress_stage,
             "entry_type": entry_type, "revision_number": revision_number,
             "notes": notes, "discipline_id": log_discipline, "assigned_to": assigned_to,
-            "submitted_at": datetime.now().isoformat()
+            "submitted_at": submitted_at
         }
 
     def get_progress_logs(self, project_id: str = None, discipline_id: str = None,
                           employee_id: str = None, start_date: str = None,
                           end_date: str = None, limit: int = None) -> list[dict]:
+        """All logs are returned, including those of hidden/deleted projects and tasks (flagged)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             query = """
-            SELECT l.*, p.name AS project_name, p.is_hidden AS project_hidden,
-                   t.name AS task_name, t.is_hidden AS task_hidden,
+            SELECT l.*, p.name AS project_name, p.is_hidden AS project_hidden, p.is_deleted AS project_deleted,
+                   t.name AS task_name, t.is_hidden AS task_hidden, t.is_deleted AS task_deleted,
                    t.discipline_id AS task_discipline_id,
-                   dt.name AS task_discipline_name,
+                   dt.name AS task_discipline_name, dt.is_hidden AS task_discipline_hidden,
                    dh.name AS head_discipline_name,
                    u.full_name AS employee_name
             FROM progress_logs l
@@ -1246,7 +1384,7 @@ class DBManager:
                 query += " AND l.end_date <= ?"
                 params.append(end_date)
 
-            query += " ORDER BY l.submitted_at DESC"
+            query += " ORDER BY l.submitted_at DESC, l.rowid DESC"
             if limit:
                 query += " LIMIT ?"
                 params.append(int(limit))
@@ -1385,7 +1523,7 @@ class DBManager:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
             prj = cursor.fetchone()
-            if not prj:
+            if not prj or prj["is_deleted"]:
                 return {}
 
             tasks = self.get_tasks(project_id=project_id, discipline_id=discipline_id,
