@@ -7,3 +7,4 @@
 *.bat text eol=crlf
 *.db binary
 *.xlsx binary
+*.sql text eol=lf

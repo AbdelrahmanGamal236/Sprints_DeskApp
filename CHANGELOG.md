@@ -2,6 +2,40 @@
 
 Finding IDs (F-xx) refer to `AUDIT_REPORT.md`.
 
+## M2: Data model, integrity and migrations
+
+### Database
+- **WAL mode** is on, so reads such as exports don't block writes. **Foreign keys are now enforced.** Writes that read and then update run in a single transaction that locks the database first. (F-14)
+- **Versioned migrations** use `PRAGMA user_version`, and each step runs only once and is safe to repeat:
+  - v2 adds soft-delete columns and indexes.
+  - v3 converts old log timestamps from UTC to local time. (F-25)
+- Old rows that point to missing users, projects or tasks are kept and reported in the server log, never deleted.
+- A seed Head with an unknown discipline code is skipped with a warning instead of stopping the server.
+
+### Workflow rules (enforced on the server)
+- **Revision numbers (R1, R2...)** are now assigned by the server, counted per task, at the moment the log is saved. The number the client sends is ignored, so logs submitted offline or at the same time still get unique, sequential numbers. (F-12)
+- **Task proposals and date-change requests** can only be decided while pending:
+  - Approving twice does nothing the second time and never creates a duplicate task.
+  - A rejected request can't be approved, and an approved one can't be rejected. (F-13)
+- Task IDs are assigned when the task is created, not reserved when a proposal is submitted. (F-14)
+- **Soft delete for projects and tasks:** a deleted item disappears from every screen. Its row and all its logs stay in the database and are flagged for reports, and its ID can't be reused. (F-16)
+- **Hidden or deleted tasks no longer accept new logs**, and a task must belong to the project the log names.
+- **The server validates everything a client sends:** dates (`YYYY-MM-DD`, start before end), progress stage, entry type, percentage 0-100, text lengths, and that disciplines and assigned Heads exist and match. (F-24)
+
+### UI
+- Heads enter a **progress percentage** (0-100). Choosing the "Done" stage sets it to 100. (F-22)
+- Admins get a **Delete** button with a confirmation dialog for projects and tasks. (F-16)
+
+### Tests
+- `tests/test_migrations.py` migrates the schema from the very first version and from the version just before this work. It also migrates copies of the real `data/central_app.db` and the oldest backup when they exist. Each migration runs twice to prove the second run changes nothing.
+- `tests/test_data_integrity.py` covers:
+  - revision numbers, including 12 concurrent writers
+  - approval rules
+  - task IDs created concurrently
+  - soft delete
+  - validation
+  - local timestamps
+
 ## M1: Core architecture correctness
 
 **Upgrade note:** the network protocol changed (version 2). Upgrade the server and **all** client PCs together. An old client trying to connect gets a clear "version does not match" message.
