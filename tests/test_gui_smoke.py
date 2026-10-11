@@ -35,7 +35,7 @@ class TestGuiSmoke(unittest.TestCase):
             return ctrl.workspace
 
         async def logout(ctrl):
-            ws = ctrl.workspace
+            ws = ctrl.workspace  # the RoleWindow / HeadWorkspace, not the inner panel
             ws.logout_requested = True
             ws.close()
             self.assertTrue(await wait_until(lambda: ctrl.workspace is None and ctrl.login_dialog.isVisible()))
@@ -48,7 +48,7 @@ class TestGuiSmoke(unittest.TestCase):
             ctrl.quit = lambda: None
             try:
                 # ---- Admin: data loads, add project through the UI, server confirms
-                ws = await login(ctrl, "adm")
+                ws = (await login(ctrl, "adm")).panel
                 self.assertTrue(await wait_until(lambda: ws.tbl_projects.rowCount() == 2))
                 self.assertTrue(await wait_until(lambda: ws.tbl_employees.rowCount() == 4))  # Heads only
                 ws.txt_prj_id.setText("P3")
@@ -65,7 +65,7 @@ class TestGuiSmoke(unittest.TestCase):
 
                 # ---- Head: projects/tasks load, submit a log, toast reflects the server ACK
                 ws = await login(ctrl, "h_urb")
-                self.assertTrue(await wait_until(lambda: ws.lst_projects.count() == 3))
+                self.assertTrue(await wait_until(lambda: ws.cmb_projects.count() == 3))
                 self.assertTrue(await wait_until(lambda: ws.lst_tasks.count() == 1))
                 ws.lst_tasks.setCurrentRow(0)
                 ws.txt_notes.setPlainText("Smoke test log")
@@ -77,10 +77,15 @@ class TestGuiSmoke(unittest.TestCase):
                 self.assertEqual(stored["progress_percentage"], 40)
                 self.assertTrue(await wait_until(lambda: "saved on the Central Server" in ws.toast.label.text()))
                 self.assertEqual(ws.sync_service.pending_count(), 0)
+                # Real-time push: a task added by an Admin appears without any manual refresh
+                before = ws.lst_tasks.count()
+                server.db.add_task(ws.cmb_projects.currentData(), name="Pushed task", discipline_id="URB")
+                await server.notify_changed("tasks")
+                self.assertTrue(await wait_until(lambda: ws.lst_tasks.count() == before + 1))
                 await logout(ctrl)
 
                 # ---- COO: live feed shows the log, alert history and dispatch work
-                ws = await login(ctrl, "coo1")
+                ws = (await login(ctrl, "coo1")).panel
                 self.assertTrue(await wait_until(lambda: ws.tbl_logs.rowCount() >= 1))
                 self.assertTrue(await wait_until(lambda: ws.cmb_target_emp.count() == 4))
                 ws.cmb_target_emp.setCurrentIndex(ws.cmb_target_emp.findData("h_urb"))
@@ -102,11 +107,14 @@ class TestGuiSmoke(unittest.TestCase):
                 await logout(ctrl)
 
                 # ---- Super Admin: sees every account; embedded Admin/COO tabs load without cross-talk
-                ws = await login(ctrl, "sa")
+                ws = (await login(ctrl, "sa")).panel
                 self.assertTrue(await wait_until(lambda: ws.tbl_users.rowCount() == len(server.db.get_users())))
                 self.assertTrue(await wait_until(lambda: ws.admin_sub.tbl_projects.rowCount() == 3))
                 await asyncio.sleep(0.5)
                 self.assertEqual(ws.tbl_users.rowCount(), len(server.db.get_users()))  # not overwritten by the COO tab's Heads-only list
+                # System Settings tab is populated from the server
+                self.assertTrue(await wait_until(lambda: len(ws.settings_inputs) == 4))
+                self.assertEqual(ws.settings_inputs["backup_retention_count"].value(), 30)
                 await logout(ctrl)
             finally:
                 await server.stop()

@@ -2,6 +2,32 @@
 
 Finding IDs (F-xx) refer to `AUDIT_REPORT.md`.
 
+## M3: Workflows
+
+### All roles
+- **Targeted change events** replace "reload everything". The server now says which kinds of data changed: projects, tasks, disciplines, users, proposals, date changes or settings. Each screen reloads only that.
+  - These events go only to the roles that need them. For example, a decision on a proposal reaches the managers and the Head who proposed it, not every Head.
+  - Clients merge a burst of events into a single reload.
+- When an Admin changes a task, the Heads' task lists update immediately, with no refresh needed.
+
+### Head
+- The **project selector is at the top**, with the discipline tab and its tasks below it. The selected project drives both the logging form and the project timeline. (F-22)
+
+### Admin / COO / Super Admin
+- The Admin and COO tools are now **reusable panels**. The Super Admin console embeds the real panels instead of borrowing the inside of hidden windows, and all role windows share one header/Logout/footer frame. (F-17)
+- New **System Settings tab** for the Super Admin, stored on the server:
+  - number of daily backups to keep (used when old backups are pruned)
+  - daily backup time
+  - minimum password length (applies immediately and is sent to clients at login)
+  - login lifetime
+  - It also shows **Central Server status**: port, database file, schema version, record counts, backup folder, latest backup and who is connected now.
+- The Super Admin can **edit any account** (name, role, discipline). The last Super Admin account cannot be given another role.
+- Splitter layouts for Admin and COO are saved **per user**. (F-26)
+- Admin analytics refresh live as new logs arrive.
+
+### Tests
+- System settings, live password policy, targeted events (who receives what), the last-Super-Admin guard, and a live task update reaching a Head's screen without a refresh.
+
 ## M2: Data model, integrity and migrations
 
 ### Database

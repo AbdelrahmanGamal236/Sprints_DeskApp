@@ -34,6 +34,7 @@ EXPECTED_ROLES = {
     "GET_ANALYTICS": {A, S},
     "GET_RECENT_LOGS": {A, C, S}, "GET_USERS": {A, C, S}, "EXPORT_EXCEL_REQUEST": {A, C, S},
     "COO_NOTIFY": {C, S},
+    "GET_SETTINGS": {S}, "UPDATE_SETTINGS": {S},
 }
 PUBLIC = {"PING", "LOGIN", "RESUME"}
 ROLE_USER = {S: "sa", A: "adm", C: "coo1", H: "h_urb"}
@@ -292,6 +293,77 @@ class TestIdentityAndScope(unittest.TestCase):
         run(scenario())
 
 
+class TestSettingsAndEvents(unittest.TestCase):
+    def test_system_settings(self):
+        async def scenario():
+            server = await start_server()
+            try:
+                sa = await raw_login(server.port, "sa")
+                r = await sa.req("GET_SETTINGS", {})
+                self.assertEqual(r["settings"]["backup_retention_count"], 30)
+                self.assertIn("port", r["info"])
+                r = await sa.req("UPDATE_SETTINGS", {"settings": {"password_min_length": 3}})
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+                r = await sa.req("UPDATE_SETTINGS", {"settings": {"backup_time": "25:99"}})
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+                r = await sa.req("UPDATE_SETTINGS", {"settings": {"password_min_length": 12, "backup_time": "3:05"}})
+                self.assertTrue(r["ok"], r)
+                self.assertEqual(r["settings"]["backup_time"], "03:05")
+                # New policy applies immediately and is announced at login
+                c = await RawClient(server.port).connect()
+                login = await c.login("h_new", "h_new")
+                self.assertEqual(login["policy"]["password_min_length"], 12)
+                r = await c.req("CHANGE_PASSWORD", {"new_password": "Only10Char"})
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+                r = await c.req("CHANGE_PASSWORD", {"new_password": "Twelve-Chars1"})
+                self.assertTrue(r["ok"], r)
+            finally:
+                await server.stop()
+        run(scenario())
+
+    def test_change_events_are_targeted(self):
+        async def scenario():
+            server = await start_server()
+            try:
+                adm = await raw_login(server.port, "adm")
+                h_urb = await raw_login(server.port, "h_urb")
+                h_str = await raw_login(server.port, "h_str")
+                # A new Head account: only oversight roles hear about it
+                r = await adm.req("CREATE_USER", {"user_id": "h10", "full_name": "H", "role": "HEAD", "discipline_id": "AI"})
+                self.assertTrue(r["ok"])
+                with self.assertRaises(TimeoutError):
+                    await h_urb.wait_for(lambda d: d.get("type") == "DATA_CHANGED", timeout=0.5)
+                # A proposal decision reaches the proposer, not the other Heads
+                prop = await h_urb.req("PROPOSE_TASK", {"proposal_id": "PR-1", "project_id": "P1", "task_name": "x"})
+                self.assertTrue(prop["ok"])
+                await adm.req("REJECT_TASK_PROPOSAL", {"proposal_id": "PR-1", "reason": "no"})
+                ev = await h_urb.wait_for(lambda d: d.get("type") == "DATA_CHANGED" and "proposals" in d["scopes"])
+                self.assertTrue(ev)
+                with self.assertRaises(TimeoutError):
+                    await h_str.wait_for(lambda d: d.get("type") == "DATA_CHANGED" and "proposals" in d["scopes"], timeout=0.5)
+                # Task changes reach every Head
+                await adm.req("ADD_TASK", {"project_id": "P1", "name": "New", "discipline_id": "STR"})
+                ev = await h_str.wait_for(lambda d: d.get("type") == "DATA_CHANGED" and "tasks" in d["scopes"])
+                self.assertTrue(ev)
+            finally:
+                await server.stop()
+        run(scenario())
+
+    def test_last_super_admin_cannot_be_demoted(self):
+        async def scenario():
+            server = await start_server()
+            try:
+                sa = await raw_login(server.port, "sa")
+                # 'superadmin' (bootstrap) and 'sa' exist; demote one, the last one is protected
+                r = await sa.req("UPDATE_USER", {"user_id": "superadmin", "role": "ADMIN"})
+                self.assertTrue(r["ok"], r)
+                r = await sa.req("UPDATE_USER", {"user_id": "sa", "role": "COO"})
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+            finally:
+                await server.stop()
+        run(scenario())
+
+
 class TestSoftDeleteProtocol(unittest.TestCase):
     def test_deleted_project_disappears_for_heads_and_keeps_logs(self):
         async def scenario():
@@ -303,7 +375,8 @@ class TestSoftDeleteProtocol(unittest.TestCase):
                 adm = await raw_login(server.port, "adm")
                 r = await adm.req("DELETE_PROJECT", {"project_id": "P1"})
                 self.assertTrue(r["ok"], r)
-                await h.wait_for(lambda d: d.get("type") == "GLOBAL_DATA_REFRESH")
+                ev = await h.wait_for(lambda d: d.get("type") == "DATA_CHANGED")
+                self.assertIn("projects", ev["scopes"])
                 snap = await h.req("GET_SNAPSHOT", {})
                 self.assertNotIn("P1", [x["project_id"] for x in snap["projects"]])
                 self.assertFalse(any(t["project_id"] == "P1" for t in snap["tasks"]))

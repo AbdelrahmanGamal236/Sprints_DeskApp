@@ -68,7 +68,10 @@ class RawClient:
             left = end - loop.time()
             if left <= 0:
                 raise TimeoutError("no matching message")
-            data = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=left))
+            try:
+                data = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=left))
+            except asyncio.TimeoutError:  # distinct from builtin TimeoutError on Python 3.10
+                raise TimeoutError("no matching message")
             if predicate(data):
                 return data
             self.events.append(data)
