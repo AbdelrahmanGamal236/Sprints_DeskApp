@@ -14,13 +14,21 @@ from app.core.config import (
 )
 from app.core.auth import hash_password, verify_password, needs_rehash, generate_password
 
-# Password policy for user-chosen passwords
+# Default password policy (the live value is the 'password_min_length' system setting)
 PASSWORD_MIN_LENGTH = 8
 # Accounts the old code seeded with password == user ID; rotated on first server start
 LEGACY_DEFAULT_PRIVILEGED_IDS = ("superadmin", "admin", "coo")
 
 # Current schema version (PRAGMA user_version); see DBManager._migrate
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# System settings managed by the Super Admin: key -> (default, type, min, max, label)
+SYSTEM_SETTINGS = {
+    "backup_retention_count": (30, int, 1, 365, "Number of daily backups to keep"),
+    "backup_time": ("02:00", str, None, None, "Daily backup time (HH:MM, server clock)"),
+    "password_min_length": (8, int, 6, 64, "Minimum password length"),
+    "session_lifetime_days": (7, int, 1, 90, "Days a login stays valid on a PC without use"),
+}
 
 ENTRY_TYPES = (ENTRY_TYPE_NEW, ENTRY_TYPE_CONTINUATION, ENTRY_TYPE_REVISION)
 MAX_NAME_LEN = 200
@@ -354,6 +362,17 @@ class DBManager:
                 cur.execute("PRAGMA user_version = 2")
             logger.info("Database migrated to schema version 2 (soft delete, indexes).")
 
+        if version < 4:
+            with self.transaction() as cur:
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT,
+                    updated_by TEXT
+                )""")
+            # version number is written after step 3 below has also run
+
         if version < 3:
             # progress_logs.submitted_at used to be written with SQLite CURRENT_TIMESTAMP (UTC), while every
             # other timestamp is local time. Convert the old rows once so all times are local.
@@ -370,6 +389,11 @@ class DBManager:
                     converted += 1
                 cur.execute("PRAGMA user_version = 3")
             logger.info("Database migrated to schema version 3 (%d log timestamps converted to local time).", converted)
+
+        if version < 4:
+            with self.transaction() as cur:
+                cur.execute("PRAGMA user_version = 4")
+            logger.info("Database migrated to schema version 4 (system settings).")
 
         with self.get_connection() as conn:
             orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -543,10 +567,12 @@ class DBManager:
 
             conn.commit()
 
-    def backup_database(self, max_copies: int = 30):
+    def backup_database(self, max_copies: int = None):
         """Automatic daily backup of central_app.db using SQLite's backup API, keeping last 30 copies."""
         try:
             BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+            if max_copies is None:
+                max_copies = self.get_settings()["backup_retention_count"]
             today_str = datetime.now().strftime("%Y%m%d")
             backup_file = BACKUPS_DIR / f"central_app_{today_str}.db"
 
@@ -710,6 +736,11 @@ class DBManager:
 
         if actor_role == ROLE_ADMIN and new_role != ROLE_HEAD:
             raise PermissionError("Admin cannot promote accounts to Admin or COO.")
+        if target["role"] == ROLE_SUPER_ADMIN and new_role != ROLE_SUPER_ADMIN:
+            if len(self.get_users(role=ROLE_SUPER_ADMIN)) <= 1:
+                raise ValueError("The last Super Admin account cannot be given another role.")
+        if new_role != ROLE_HEAD:
+            new_discipline_id = None
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -753,8 +784,9 @@ class DBManager:
                 raise ValueError("Incorrect current password.")
 
         new_password = new_password or ""
-        if len(new_password) < PASSWORD_MIN_LENGTH:
-            raise ValueError(f"New password must be at least {PASSWORD_MIN_LENGTH} characters.")
+        min_len = self.get_settings()["password_min_length"]
+        if len(new_password) < min_len:
+            raise ValueError(f"New password must be at least {min_len} characters.")
         if new_password == user_id:
             raise ValueError("New password cannot be the same as your User ID.")
         if verify_password(new_password, user["password_hash"], user["password_salt"]):
@@ -769,8 +801,58 @@ class DBManager:
             conn.commit()
         return True
 
+    # ------------------- SYSTEM SETTINGS -------------------
+    def get_settings(self) -> dict:
+        values = {k: spec[0] for k, spec in SYSTEM_SETTINGS.items()}
+        with self.get_connection() as conn:
+            for row in conn.execute("SELECT key, value FROM system_settings").fetchall():
+                spec = SYSTEM_SETTINGS.get(row["key"])
+                if spec:
+                    try:
+                        values[row["key"]] = spec[1](row["value"])
+                    except (TypeError, ValueError):
+                        pass
+        return values
+
+    def update_settings(self, changes: dict, actor_id: str) -> dict:
+        clean = {}
+        for key, raw in (changes or {}).items():
+            if key not in SYSTEM_SETTINGS:
+                raise ValueError(f"Unknown setting '{key}'.")
+            default, typ, lo, hi, label = SYSTEM_SETTINGS[key]
+            try:
+                value = typ(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{label}: invalid value.")
+            if typ is int and not lo <= value <= hi:
+                raise ValueError(f"{label} must be between {lo} and {hi}.")
+            if key == "backup_time":
+                try:
+                    value = datetime.strptime(value.strip(), "%H:%M").strftime("%H:%M")
+                except ValueError:
+                    raise ValueError(f"{label} must be in HH:MM format.")
+            clean[key] = value
+        with self.transaction() as cur:
+            for key, value in clean.items():
+                cur.execute("""INSERT INTO system_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)
+                               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at,
+                               updated_by = excluded.updated_by""", (key, str(value), now_local(), actor_id))
+        return self.get_settings()
+
+    def get_system_info(self) -> dict:
+        with self.get_connection() as conn:
+            counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                      for t in ("users", "projects", "tasks", "progress_logs")}
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        backups = sorted(BACKUPS_DIR.glob("central_app_*.db"))
+        return {"db_path": str(self.db_path), "schema_version": version, "counts": counts,
+                "backup_folder": str(BACKUPS_DIR), "backup_count": len(backups),
+                "last_backup": backups[-1].name if backups else None}
+
     # ------------------- SESSIONS -------------------
-    SESSION_LIFETIME = timedelta(days=7)
+    @property
+    def SESSION_LIFETIME(self) -> timedelta:
+        return timedelta(days=self.get_settings()["session_lifetime_days"])
 
     @staticmethod
     def _token_hash(token: str) -> str:

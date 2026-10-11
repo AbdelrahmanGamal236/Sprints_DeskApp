@@ -60,7 +60,7 @@ class NetworkClient(QObject):
     notification_response_received = Signal(dict)
     task_proposal_event = Signal(dict)
     task_date_change_event = Signal(dict)
-    global_refresh_received = Signal()
+    data_changed = Signal(list)                    # scopes that changed on the server (see server.notify_changed)
 
     def __init__(self, server_ip: str = "127.0.0.1", port: int = DEFAULT_WS_PORT,
                  ping_interval: float = 10, ping_timeout: float = 20):
@@ -74,6 +74,7 @@ class NetworkClient(QObject):
         self.user_id: str | None = None
         self.role: str | None = None
         self.session_token: str | None = None
+        self.policy: dict = {}
         self.websocket = None
         self.is_connected = False  # connected AND authenticated
         self.running = False
@@ -107,6 +108,7 @@ class NetworkClient(QObject):
             raise
         self._set_user(reply["user"])
         self.session_token = reply["session_token"]
+        self.policy = reply.get("policy") or {}
         self.running = True
         # Usable immediately, before the session loop task gets its first turn
         self.websocket = ws
@@ -218,8 +220,8 @@ class NetworkClient(QObject):
             self._emit(self.task_proposal_event, data)
         elif msg_type == "TASK_DATE_CHANGE_EVENT":
             self._emit(self.task_date_change_event, data)
-        elif msg_type == "GLOBAL_DATA_REFRESH":
-            self._emit(self.global_refresh_received)
+        elif msg_type == "DATA_CHANGED":
+            self._emit(self.data_changed, list(data.get("scopes") or []))
 
     # ------------------------------------------------------------------ requests
     async def _request_on(self, ws, action: str, payload: dict, timeout: float) -> dict:

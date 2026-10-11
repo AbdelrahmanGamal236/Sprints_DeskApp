@@ -138,8 +138,13 @@ class CentralWebSocketServer:
                 sent = await self._send(ws, message_dict) or sent
         return sent
 
-    async def refresh_all(self, reason: str):
-        await self.broadcast({"type": "GLOBAL_DATA_REFRESH", "reason": reason})
+    async def notify_changed(self, *scopes: str, roles=None, extra_user_ids=()):
+        """
+        Tell clients which kinds of data changed so they reload only that.
+        Scopes: projects, tasks, disciplines, users, proposals, date_changes, settings.
+        """
+        await self.broadcast({"type": "DATA_CHANGED", "scopes": list(scopes)}, target_roles=roles,
+                             extra_user_ids=extra_user_ids)
 
     async def _revoke_user_sessions(self, user_id: str, reason: str):
         for ws, sess in list(self.sessions.items()):
@@ -285,7 +290,9 @@ class CentralWebSocketServer:
         token = await self.db_call(self.db.create_session, user["user_id"])
         sess = Session(user, token)
         self.sessions[ws] = sess
-        return {"user": sess.public_user(), "session_token": token, "protocol": P.PROTOCOL_VERSION}
+        settings = await self.db_call(self.db.get_settings)
+        return {"user": sess.public_user(), "session_token": token, "protocol": P.PROTOCOL_VERSION,
+                "policy": {"password_min_length": settings["password_min_length"]}}
 
     @action("RESUME", public=True, response_type="RESUME_RESPONSE")
     async def a_resume(self, ws, session, payload, msg_id):
@@ -377,6 +384,7 @@ class CentralWebSocketServer:
             planned_start_date=payload.get("planned_start_date"), planned_end_date=payload.get("planned_end_date"),
             proposal_id=payload.get("proposal_id"))
         await self.broadcast({"type": "NEW_TASK_PROPOSAL_EVENT", "proposal": prop}, target_roles=MANAGERS)
+        await self.notify_changed("proposals", roles=MANAGERS)
         return {"id": prop["proposal_id"], "proposal": prop}
 
     @action("APPROVE_TASK_PROPOSAL", roles=MANAGERS)
@@ -385,7 +393,8 @@ class CentralWebSocketServer:
         prop = await self.db_call(self.db.approve_task_proposal, payload["proposal_id"], session.user_id)
         await self.broadcast({"type": "TASK_PROPOSAL_DECIDED_EVENT", "proposal": prop},
                              target_roles=MANAGERS, extra_user_ids=(prop.get("proposed_by_id"),))
-        await self.refresh_all("TASK_PROPOSAL_APPROVED")
+        await self.notify_changed("tasks")
+        await self.notify_changed("proposals", roles=MANAGERS, extra_user_ids=(prop.get("proposed_by_id"),))
         return {"proposal": prop}
 
     @action("REJECT_TASK_PROPOSAL", roles=MANAGERS)
@@ -394,6 +403,7 @@ class CentralWebSocketServer:
         prop = await self.db_call(self.db.reject_task_proposal, payload["proposal_id"], session.user_id, payload["reason"])
         await self.broadcast({"type": "TASK_PROPOSAL_DECIDED_EVENT", "proposal": prop},
                              target_roles=MANAGERS, extra_user_ids=(prop.get("proposed_by_id"),))
+        await self.notify_changed("proposals", roles=MANAGERS, extra_user_ids=(prop.get("proposed_by_id"),))
         return {"proposal": prop}
 
     @action("GET_TASK_PROPOSALS", roles=(ROLE_HEAD,) + MANAGERS, response_type="TASK_PROPOSALS_RESPONSE")
@@ -417,6 +427,7 @@ class CentralWebSocketServer:
             reason=payload["reason"], request_id=payload["request_id"])
         await self.broadcast({"type": "TASK_DATE_CHANGE_EVENT", "request": req, "event": "CREATED"},
                              target_roles=MANAGERS)
+        await self.notify_changed("date_changes", roles=MANAGERS)
         return {"id": req["request_id"], "request": req}
 
     @action("APPROVE_DATE_CHANGE", roles=MANAGERS)
@@ -425,7 +436,8 @@ class CentralWebSocketServer:
         dec = await self.db_call(self.db.approve_task_date_change_request, payload["request_id"], session.user_id)
         await self.broadcast({"type": "TASK_DATE_CHANGE_EVENT", "request": dec, "event": "APPROVED"},
                              target_roles=MANAGERS, extra_user_ids=(dec.get("requested_by_id"),))
-        await self.refresh_all("DATE_CHANGE_APPROVED")
+        await self.notify_changed("tasks")
+        await self.notify_changed("date_changes", roles=MANAGERS, extra_user_ids=(dec.get("requested_by_id"),))
         return {"request": dec}
 
     @action("REJECT_DATE_CHANGE", roles=MANAGERS)
@@ -435,6 +447,7 @@ class CentralWebSocketServer:
                                  session.user_id, payload["reason"])
         await self.broadcast({"type": "TASK_DATE_CHANGE_EVENT", "request": dec, "event": "REJECTED"},
                              target_roles=MANAGERS, extra_user_ids=(dec.get("requested_by_id"),))
+        await self.notify_changed("date_changes", roles=MANAGERS, extra_user_ids=(dec.get("requested_by_id"),))
         return {"request": dec}
 
     @action("GET_DATE_CHANGE_REQUESTS", roles=(ROLE_HEAD,) + MANAGERS, response_type="DATE_CHANGE_REQUESTS_RESPONSE")
@@ -482,14 +495,14 @@ class CentralWebSocketServer:
     async def a_add_discipline(self, ws, session, payload, msg_id):
         _require(payload, "discipline_id", "name")
         d = await self.db_call(self.db.add_discipline, payload["discipline_id"], payload["name"])
-        await self.refresh_all("DISCIPLINE_ADDED")
+        await self.notify_changed("disciplines", "tasks")
         return {"discipline": d}
 
     @action("TOGGLE_HIDE_DISCIPLINE", roles=MANAGERS)
     async def a_toggle_discipline(self, ws, session, payload, msg_id):
         _require(payload, "discipline_id")
         d = await self.db_call(self.db.toggle_hide_discipline, payload["discipline_id"], payload.get("current_hidden"))
-        await self.refresh_all("DISCIPLINE_VISIBILITY_CHANGED")
+        await self.notify_changed("disciplines", "tasks")
         return {"discipline": d}
 
     # ---------------- users ----------------
@@ -505,7 +518,7 @@ class CentralWebSocketServer:
         new_u = await self.db_call(self.db.create_user, actor_role=session.role, user_id=payload.get("user_id"),
                                    full_name=payload.get("full_name"), role=payload.get("role"),
                                    discipline_id=payload.get("discipline_id"))
-        await self.broadcast({"type": "GLOBAL_DATA_REFRESH", "reason": "USER_CREATED"}, target_roles=OVERSIGHT)
+        await self.notify_changed("users", roles=OVERSIGHT)
         return {"user": new_u}
 
     @action("UPDATE_USER", roles=MANAGERS, response_type="UPDATE_USER_RESPONSE")
@@ -515,7 +528,7 @@ class CentralWebSocketServer:
                                   full_name=payload.get("full_name"), discipline_id=payload.get("discipline_id"),
                                   role=payload.get("role"))
         await self._refresh_user_sessions(payload["user_id"])
-        await self.refresh_all("USER_UPDATED")
+        await self.notify_changed("users", "tasks")
         return {"user": up_u}
 
     @action("RESET_PASSWORD", roles=MANAGERS, response_type="RESET_PASSWORD_RESPONSE")
@@ -536,21 +549,21 @@ class CentralWebSocketServer:
     async def a_add_project(self, ws, session, payload, msg_id):
         _require(payload, "project_id", "name")
         p = await self.db_call(self.db.add_project, payload["project_id"], payload["name"], payload.get("description", ""))
-        await self.refresh_all("PROJECT_ADDED")
+        await self.notify_changed("projects")
         return {"project": p}
 
     @action("TOGGLE_HIDE_PROJECT", roles=MANAGERS)
     async def a_toggle_project(self, ws, session, payload, msg_id):
         _require(payload, "project_id")
         p = await self.db_call(self.db.toggle_hide_project, payload["project_id"], payload.get("current_hidden"))
-        await self.refresh_all("PROJECT_VISIBILITY_CHANGED")
+        await self.notify_changed("projects", "tasks")
         return {"project": p}
 
     @action("DELETE_PROJECT", roles=MANAGERS)
     async def a_delete_project(self, ws, session, payload, msg_id):
         _require(payload, "project_id")
         p = await self.db_call(self.db.delete_project, payload["project_id"], session.user_id)
-        await self.refresh_all("PROJECT_DELETED")
+        await self.notify_changed("projects", "tasks")
         return {"project": p}
 
     @action("GET_TASKS", response_type="TASKS_RESPONSE")
@@ -572,7 +585,7 @@ class CentralWebSocketServer:
             discipline_id=payload["discipline_id"], planned_start_date=payload.get("planned_start_date"),
             planned_end_date=payload.get("planned_end_date"), description=payload.get("description", ""),
             proposed_by_id=None, assigned_head_id=payload.get("assigned_head_id"))
-        await self.refresh_all("TASK_ADDED")
+        await self.notify_changed("tasks")
         return {"task": t}
 
     @action("UPDATE_TASK", roles=MANAGERS)
@@ -583,7 +596,7 @@ class CentralWebSocketServer:
         if "assigned_head_id" in payload:
             kwargs["assigned_head_id"] = payload.get("assigned_head_id")
         t = await self.db_call(self.db.update_task, task_id=payload["task_id"], **kwargs)
-        await self.refresh_all("TASK_UPDATED")
+        await self.notify_changed("tasks")
         return {"task": t}
 
     @action("UPDATE_TASK_DATES", roles=MANAGERS)
@@ -591,21 +604,21 @@ class CentralWebSocketServer:
         _require(payload, "task_id", "planned_start_date", "planned_end_date")
         t = await self.db_call(self.db.update_task_dates, payload["task_id"],
                                payload["planned_start_date"], payload["planned_end_date"])
-        await self.refresh_all("TASK_DATES_UPDATED")
+        await self.notify_changed("tasks")
         return {"task": t}
 
     @action("TOGGLE_HIDE_TASK", roles=MANAGERS)
     async def a_toggle_task(self, ws, session, payload, msg_id):
         _require(payload, "task_id")
         t = await self.db_call(self.db.toggle_hide_task, payload["task_id"], payload.get("current_hidden"))
-        await self.refresh_all("TASK_VISIBILITY_CHANGED")
+        await self.notify_changed("tasks")
         return {"task": t}
 
     @action("DELETE_TASK", roles=MANAGERS)
     async def a_delete_task(self, ws, session, payload, msg_id):
         _require(payload, "task_id")
         t = await self.db_call(self.db.delete_task, payload["task_id"], session.user_id)
-        await self.refresh_all("TASK_DELETED")
+        await self.notify_changed("tasks")
         return {"task": t}
 
     @action("GET_PROJECT_TIMELINE", response_type="PROJECT_TIMELINE_RESPONSE")
@@ -618,6 +631,23 @@ class CentralWebSocketServer:
         else:
             data = await self.db_call(self.db.get_project_timeline_data, payload["project_id"])
         return {"data": data}
+
+    # ---------------- system settings ----------------
+    @action("GET_SETTINGS", roles=(ROLE_SUPER_ADMIN,), response_type="SETTINGS_RESPONSE")
+    async def a_get_settings(self, ws, session, payload, msg_id):
+        from app.database.db_manager import SYSTEM_SETTINGS
+        settings = await self.db_call(self.db.get_settings)
+        info = await self.db_call(self.db.get_system_info)
+        info.update({"port": self.port, "protocol": P.PROTOCOL_VERSION,
+                     "connected_users": sorted({s.user_id for _, s in self._live_sessions()})})
+        labels = {k: spec[4] for k, spec in SYSTEM_SETTINGS.items()}
+        return {"settings": settings, "labels": labels, "info": info}
+
+    @action("UPDATE_SETTINGS", roles=(ROLE_SUPER_ADMIN,), response_type="SETTINGS_RESPONSE")
+    async def a_update_settings(self, ws, session, payload, msg_id):
+        settings = await self.db_call(self.db.update_settings, payload.get("settings") or {}, session.user_id)
+        await self.notify_changed("settings", roles=(ROLE_SUPER_ADMIN,))
+        return {"settings": settings}
 
     # ---------------- analytics & export ----------------
     @action("GET_ANALYTICS", roles=MANAGERS, response_type="ANALYTICS_RESPONSE")
