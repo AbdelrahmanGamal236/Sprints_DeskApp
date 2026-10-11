@@ -1,8 +1,10 @@
 import sqlite3
+import hashlib
+import secrets
 import uuid
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from contextlib import contextmanager
 from app.core.config import (
@@ -10,7 +12,12 @@ from app.core.config import (
     ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN, ALL_ROLES,
     DEFAULT_DISCIPLINES
 )
-from app.core.auth import hash_password, verify_password
+from app.core.auth import hash_password, verify_password, needs_rehash, generate_password
+
+# Password policy for user-chosen passwords
+PASSWORD_MIN_LENGTH = 8
+# Accounts the old code seeded with password == user ID; rotated on first server start
+LEGACY_DEFAULT_PRIVILEGED_IDS = ("superadmin", "admin", "coo")
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +31,8 @@ class DBManager:
 
     @contextmanager
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        # timeout = busy wait (seconds) when another connection holds the write lock
+        conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -228,12 +236,68 @@ class DBManager:
             );
             """)
 
+            # 10. Login sessions (only a SHA-256 of the token is stored)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            );
+            """)
+
             conn.commit()
 
         # Seed initial data
         self.seed_disciplines()
         self.seed_defaults(standalone=standalone)
         self.seed_heads_from_file()
+        # One-time credentials created at startup (Super Admin bootstrap / rotated legacy defaults)
+        self.bootstrap_credentials = [] if standalone else self.bootstrap_privileged_accounts()
+
+    def bootstrap_privileged_accounts(self) -> list[tuple[str, str]]:
+        """
+        Production bootstrap (replaces the old admin/admin, coo/coo, superadmin/superadmin seeds):
+        - If no SUPER_ADMIN exists, create 'superadmin' with a random one-time password.
+        - Legacy seeded accounts that still have password == user ID and were never used
+          (must_change_password = 1) get a random one-time password instead.
+        Returns [(user_id, one_time_password)] for the server to show on its console.
+        Every returned account must change its password at first login.
+        """
+        issued = []
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) AS n FROM users WHERE role = ?", (ROLE_SUPER_ADMIN,))
+            if cursor.fetchone()["n"] == 0:
+                pwd = generate_password()
+                pwd_hash, pwd_salt = hash_password(pwd)
+                cursor.execute("SELECT 1 FROM users WHERE user_id = 'superadmin'")
+                if cursor.fetchone():
+                    cursor.execute("""UPDATE users SET role = ?, password_hash = ?, password_salt = ?,
+                                      must_change_password = 1, discipline_id = NULL WHERE user_id = 'superadmin'""",
+                                   (ROLE_SUPER_ADMIN, pwd_hash, pwd_salt))
+                else:
+                    cursor.execute("""INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
+                                      VALUES ('superadmin', 'System Super Admin', ?, ?, ?, 1)""",
+                                   (pwd_hash, pwd_salt, ROLE_SUPER_ADMIN))
+                issued.append(("superadmin", pwd))
+
+            placeholders = ",".join("?" * len(LEGACY_DEFAULT_PRIVILEGED_IDS))
+            cursor.execute(f"""SELECT user_id, password_hash, password_salt FROM users
+                               WHERE user_id IN ({placeholders}) AND role != 'HEAD' AND must_change_password = 1""",
+                           LEGACY_DEFAULT_PRIVILEGED_IDS)
+            for row in cursor.fetchall():
+                if any(uid == row["user_id"] for uid, _ in issued):
+                    continue
+                if verify_password(row["user_id"], row["password_hash"], row["password_salt"]):
+                    pwd = generate_password()
+                    pwd_hash, pwd_salt = hash_password(pwd)
+                    cursor.execute("UPDATE users SET password_hash = ?, password_salt = ? WHERE user_id = ?",
+                                   (pwd_hash, pwd_salt, row["user_id"]))
+                    issued.append((row["user_id"], pwd))
+            conn.commit()
+        return issued
 
     def seed_disciplines(self):
         """Idempotently seeds required disciplines."""
@@ -247,72 +311,57 @@ class DBManager:
             conn.commit()
 
     def seed_defaults(self, standalone: bool = False):
+        """Demo data for --standalone single-PC testing only (lives in a separate data_demo folder)."""
+        if not standalone:
+            return
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Default superadmin
-            cursor.execute("SELECT * FROM users WHERE user_id = 'superadmin'")
-            if not cursor.fetchone():
-                pwd_hash, pwd_salt = hash_password("superadmin")
-                cursor.execute(
-                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
-                    ("superadmin", "System Super Admin", pwd_hash, pwd_salt, ROLE_SUPER_ADMIN, 1)
-                )
-
-            # Default admin
-            cursor.execute("SELECT * FROM users WHERE user_id = 'admin'")
-            if not cursor.fetchone():
-                pwd_hash, pwd_salt = hash_password("admin")
-                cursor.execute(
-                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
-                    ("admin", "Admin Manager", pwd_hash, pwd_salt, ROLE_ADMIN, 1)
-                )
-
-            # Default coo
-            cursor.execute("SELECT * FROM users WHERE user_id = 'coo'")
-            if not cursor.fetchone():
-                pwd_hash, pwd_salt = hash_password("coo")
-                cursor.execute(
-                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
-                    ("coo", "Chief Operating Officer", pwd_hash, pwd_salt, ROLE_COO, 1)
-                )
-
-            # Only seed demo Head 1001 if standalone mode is enabled
-            if standalone:
-                cursor.execute("SELECT * FROM users WHERE user_id = '1001'")
+            for uid, name, role in (("superadmin", "System Super Admin", ROLE_SUPER_ADMIN),
+                                    ("admin", "Admin Manager", ROLE_ADMIN),
+                                    ("coo", "Chief Operating Officer", ROLE_COO)):
+                cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (uid,))
                 if not cursor.fetchone():
-                    pwd_hash, pwd_salt = hash_password("1001")
+                    pwd_hash, pwd_salt = hash_password(uid)
                     cursor.execute(
-                        "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password, discipline_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        ("1001", "Eng. Abdelrahman", pwd_hash, pwd_salt, ROLE_HEAD, 1, "AI")
+                        "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, 1)",
+                        (uid, name, pwd_hash, pwd_salt, role)
                     )
 
-                # Sample projects if empty
-                cursor.execute("SELECT * FROM projects")
-                if not cursor.fetchall():
-                    p1_id = "PRJ-01"
-                    p2_id = "PRJ-02"
-                    cursor.execute("INSERT INTO projects (project_id, name, description) VALUES (?, ?, ?)",
-                                   (p1_id, "Project Alpha", "Main Core System Development"))
-                    cursor.execute("INSERT INTO projects (project_id, name, description) VALUES (?, ?, ?)",
-                                   (p2_id, "Project Beta", "Hardware LAN Setup & Wiring"))
+            # Demo Head 1001 and sample projects
+            cursor.execute("SELECT * FROM users WHERE user_id = '1001'")
+            if not cursor.fetchone():
+                pwd_hash, pwd_salt = hash_password("1001")
+                cursor.execute(
+                    "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password, discipline_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("1001", "Eng. Abdelrahman", pwd_hash, pwd_salt, ROLE_HEAD, 1, "AI")
+                )
 
-                    today_str = datetime.now().strftime("%Y-%m-%d")
-                    cursor.execute("""
-                    INSERT INTO tasks (task_id, project_id, name, description, discipline_id, planned_start_date, planned_end_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, ("TSK-01", p1_id, "Database Schema & Migration", "Design SQLite schema", "STR", today_str, today_str))
-                    cursor.execute("""
-                    INSERT INTO tasks (task_id, project_id, name, description, discipline_id, planned_start_date, planned_end_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, ("TSK-02", p1_id, "PySide6 GUI Layout", "Build Head workspace", "AI", today_str, today_str))
-                    cursor.execute("""
-                    INSERT INTO tasks (task_id, project_id, name, description, discipline_id, planned_start_date, planned_end_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, ("TSK-03", p2_id, "Router & Switch Config", "Configure local LAN TCP/IP", "ELE", today_str, today_str))
+            # Sample projects if empty
+            cursor.execute("SELECT * FROM projects")
+            if not cursor.fetchall():
+                p1_id = "PRJ-01"
+                p2_id = "PRJ-02"
+                cursor.execute("INSERT INTO projects (project_id, name, description) VALUES (?, ?, ?)",
+                               (p1_id, "Project Alpha", "Main Core System Development"))
+                cursor.execute("INSERT INTO projects (project_id, name, description) VALUES (?, ?, ?)",
+                               (p2_id, "Project Beta", "Hardware LAN Setup & Wiring"))
 
-                    cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)", ("1001", p1_id))
-                    cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)", ("1001", p2_id))
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                cursor.execute("""
+                INSERT INTO tasks (task_id, project_id, name, description, discipline_id, planned_start_date, planned_end_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, ("TSK-01", p1_id, "Database Schema & Migration", "Design SQLite schema", "STR", today_str, today_str))
+                cursor.execute("""
+                INSERT INTO tasks (task_id, project_id, name, description, discipline_id, planned_start_date, planned_end_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, ("TSK-02", p1_id, "PySide6 GUI Layout", "Build Head workspace", "AI", today_str, today_str))
+                cursor.execute("""
+                INSERT INTO tasks (task_id, project_id, name, description, discipline_id, planned_start_date, planned_end_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, ("TSK-03", p2_id, "Router & Switch Config", "Configure local LAN TCP/IP", "ELE", today_str, today_str))
+
+                cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)", ("1001", p1_id))
+                cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)", ("1001", p2_id))
 
             conn.commit()
 
@@ -478,14 +527,22 @@ class DBManager:
             return [dict(r) for r in cursor.fetchall()]
 
     def create_user(self, actor_role: str, user_id: str, full_name: str, role: str, discipline_id: str = None) -> dict:
-        # B5 enforcement: Admin can create HEAD accounts only.
+        # Fail closed: only ADMIN (HEAD accounts) and SUPER_ADMIN (any role) may create users.
+        if actor_role not in (ROLE_ADMIN, ROLE_SUPER_ADMIN):
+            raise PermissionError("You are not allowed to create user accounts.")
+        if role not in ALL_ROLES:
+            raise ValueError(f"Unknown role '{role}'.")
         if actor_role == ROLE_ADMIN and role != ROLE_HEAD:
             raise PermissionError("Admin can only create and manage HEAD accounts.")
         if role == ROLE_HEAD and not discipline_id:
             raise ValueError("Discipline is required for HEAD accounts.")
 
-        user_id = user_id.strip()
-        full_name = full_name.strip()
+        user_id = (user_id or "").strip()
+        full_name = (full_name or "").strip()
+        if not user_id or not full_name:
+            raise ValueError("User ID and Full Name are required.")
+        if role != ROLE_HEAD:
+            discipline_id = None
         pwd_hash, pwd_salt = hash_password(user_id) # initial password = user_id
 
         with self.get_connection() as conn:
@@ -516,9 +573,12 @@ class DBManager:
         if not target:
             raise ValueError(f"User '{user_id}' not found.")
 
-        # B5: Admin can only manage HEAD accounts
+        if actor_role not in (ROLE_ADMIN, ROLE_SUPER_ADMIN):
+            raise PermissionError("You are not allowed to manage user accounts.")
         if actor_role == ROLE_ADMIN and target["role"] != ROLE_HEAD:
             raise PermissionError("Admin can only manage HEAD accounts.")
+        if role is not None and role not in ALL_ROLES:
+            raise ValueError(f"Unknown role '{role}'.")
 
         new_full_name = full_name.strip() if full_name is not None else target["full_name"]
         new_discipline_id = discipline_id if discipline_id is not None else target["discipline_id"]
@@ -540,6 +600,8 @@ class DBManager:
         target = self.get_user(user_id)
         if not target:
             raise ValueError(f"User '{user_id}' not found.")
+        if actor_role not in (ROLE_ADMIN, ROLE_SUPER_ADMIN):
+            raise PermissionError("You are not allowed to reset passwords.")
         if actor_role == ROLE_ADMIN and target["role"] != ROLE_HEAD:
             raise PermissionError("Admin can only reset passwords for HEAD accounts.")
 
@@ -549,20 +611,30 @@ class DBManager:
             cursor.execute("""
             UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 1 WHERE user_id = ?
             """, (pwd_hash, pwd_salt, user_id))
+            conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
             conn.commit()
         return {"user_id": user_id, "status": "RESET_SUCCESS"}
 
-    def change_password(self, user_id: str, new_password: str, old_password: str = None, force: bool = False) -> bool:
+    def change_password(self, user_id: str, new_password: str, old_password: str = None, require_old: bool = True) -> bool:
+        """
+        Changes a user's password. The caller (server) decides whether the old password is
+        required; it is only waived for the forced first-login change on an authenticated session.
+        """
         user = self.get_user(user_id)
         if not user:
             raise ValueError(f"User '{user_id}' not found.")
 
-        if not force and old_password is not None:
-            if not verify_password(old_password, user["password_hash"], user["password_salt"]):
+        if require_old:
+            if not old_password or not verify_password(old_password, user["password_hash"], user["password_salt"]):
                 raise ValueError("Incorrect current password.")
 
+        new_password = new_password or ""
+        if len(new_password) < PASSWORD_MIN_LENGTH:
+            raise ValueError(f"New password must be at least {PASSWORD_MIN_LENGTH} characters.")
         if new_password == user_id:
             raise ValueError("New password cannot be the same as your User ID.")
+        if verify_password(new_password, user["password_hash"], user["password_salt"]):
+            raise ValueError("New password must be different from the current password.")
 
         pwd_hash, pwd_salt = hash_password(new_password)
         with self.get_connection() as conn:
@@ -572,6 +644,65 @@ class DBManager:
             """, (pwd_hash, pwd_salt, user_id))
             conn.commit()
         return True
+
+    # ------------------- SESSIONS -------------------
+    SESSION_LIFETIME = timedelta(days=7)
+
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def create_session(self, user_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = datetime.now()
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM user_sessions WHERE expires_at < ?", (now.isoformat(),))
+            conn.execute("INSERT INTO user_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                         (self._token_hash(token), user_id, now.isoformat(), (now + self.SESSION_LIFETIME).isoformat()))
+            conn.commit()
+        return token
+
+    def resolve_session(self, token: str) -> dict | None:
+        """Returns the user for a valid, unexpired session token and extends its lifetime."""
+        if not token:
+            return None
+        now = datetime.now()
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT user_id, expires_at FROM user_sessions WHERE token_hash = ?",
+                               (self._token_hash(token),)).fetchone()
+            if not row or row["expires_at"] < now.isoformat():
+                return None
+            conn.execute("UPDATE user_sessions SET expires_at = ? WHERE token_hash = ?",
+                         ((now + self.SESSION_LIFETIME).isoformat(), self._token_hash(token)))
+            conn.commit()
+        return self.get_user(row["user_id"])
+
+    def delete_session(self, token: str):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (self._token_hash(token or ""),))
+            conn.commit()
+
+    def delete_user_sessions(self, user_id: str, keep_token: str = None):
+        with self.get_connection() as conn:
+            if keep_token:
+                conn.execute("DELETE FROM user_sessions WHERE user_id = ? AND token_hash != ?",
+                             (user_id, self._token_hash(keep_token)))
+            else:
+                conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            conn.commit()
+
+    def authenticate(self, user_id: str, password: str) -> dict | None:
+        """Returns the user row when the credentials are valid; upgrades legacy hashes in place."""
+        user = self.get_user((user_id or "").strip())
+        if not user or not verify_password(password or "", user["password_hash"], user["password_salt"]):
+            return None
+        if needs_rehash(user["password_hash"]):
+            pwd_hash, pwd_salt = hash_password(password)
+            with self.get_connection() as conn:
+                conn.execute("UPDATE users SET password_hash = ?, password_salt = ? WHERE user_id = ?",
+                             (pwd_hash, pwd_salt, user["user_id"]))
+                conn.commit()
+        return user
 
     # ------------------- PROJECTS API -------------------
     def get_projects(self, include_hidden: bool = False) -> list[dict]:
@@ -1079,7 +1210,7 @@ class DBManager:
 
     def get_progress_logs(self, project_id: str = None, discipline_id: str = None,
                           employee_id: str = None, start_date: str = None,
-                          end_date: str = None) -> list[dict]:
+                          end_date: str = None, limit: int = None) -> list[dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             query = """
@@ -1116,15 +1247,29 @@ class DBManager:
                 params.append(end_date)
 
             query += " ORDER BY l.submitted_at DESC"
+            if limit:
+                query += " LIMIT ?"
+                params.append(int(limit))
             cursor.execute(query, tuple(params))
             return [dict(r) for r in cursor.fetchall()]
 
     # ------------------- PRIORITY NOTIFICATIONS API -------------------
-    def create_priority_notification(self, coo_id: str, target_employee_id: str, message: str) -> dict:
-        notif_id = f"NOTIF-{uuid.uuid4().hex[:8].upper()}"
+    def create_priority_notification(self, coo_id: str, target_employee_id: str, message: str,
+                                     notification_id: str = None) -> dict:
+        message = (message or "").strip()
+        if not message:
+            raise ValueError("Alert message is required.")
+        target = self.get_user(target_employee_id)
+        if not target or target["role"] != ROLE_HEAD:
+            raise ValueError(f"Target '{target_employee_id}' is not a Head account.")
+        notif_id = notification_id or f"NOTIF-{uuid.uuid4().hex.upper()}"
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("SELECT * FROM priority_notifications WHERE notification_id = ?", (notif_id,))
+            existing = cursor.fetchone()
+            if existing:  # idempotent resend
+                return dict(existing)
             cursor.execute("""
             INSERT INTO priority_notifications (notification_id, coo_id, target_employee_id, message, status, created_at)
             VALUES (?, ?, ?, ?, 'PENDING', ?)
@@ -1137,32 +1282,45 @@ class DBManager:
         }
 
     def respond_priority_notification(self, notification_id: str, employee_id: str, response_status: str) -> dict:
+        if response_status not in ("ACCEPTED", "DENIED"):
+            raise ValueError("Response must be ACCEPTED or DENIED.")
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("SELECT * FROM priority_notifications WHERE notification_id = ?", (notification_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Alert '{notification_id}' not found.")
+            if row["target_employee_id"] != employee_id:
+                raise PermissionError("This alert was sent to a different Head.")
+            if row["status"] != "PENDING":
+                if row["status"] == response_status:  # idempotent resend from the offline queue
+                    return dict(row)
+                raise ValueError(f"Alert was already answered ({row['status']}).")
             cursor.execute("""
-            UPDATE priority_notifications
-            SET status = ?, responded_at = ?
-            WHERE notification_id = ?
+            UPDATE priority_notifications SET status = ?, responded_at = ? WHERE notification_id = ?
             """, (response_status, now_str, notification_id))
             conn.commit()
-        return {
-            "notification_id": notification_id, "target_employee_id": employee_id,
-            "status": response_status, "responded_at": now_str
-        }
+            result = dict(row)
+        result.update({"status": response_status, "responded_at": now_str})
+        return result
 
-    def get_priority_notifications(self, employee_id: str = None, status: str = None) -> list[dict]:
+    def get_priority_notifications(self, employee_id: str = None, status: str = None, limit: int = None) -> list[dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            query = "SELECT * FROM priority_notifications WHERE 1=1"
+            query = """SELECT n.*, u.full_name AS target_name FROM priority_notifications n
+                       LEFT JOIN users u ON n.target_employee_id = u.user_id WHERE 1=1"""
             params = []
             if employee_id:
-                query += " AND target_employee_id = ?"
+                query += " AND n.target_employee_id = ?"
                 params.append(employee_id)
             if status:
-                query += " AND status = ?"
+                query += " AND n.status = ?"
                 params.append(status)
-            query += " ORDER BY created_at DESC"
+            query += " ORDER BY n.created_at DESC"
+            if limit:
+                query += " LIMIT ?"
+                params.append(int(limit))
             cursor.execute(query, tuple(params))
             return [dict(r) for r in cursor.fetchall()]
 
@@ -1221,7 +1379,7 @@ class DBManager:
             "project_breakdown": prj_stats
         }
 
-    def get_project_timeline_data(self, project_id: str) -> dict:
+    def get_project_timeline_data(self, project_id: str, discipline_id: str = None, assigned_head_id: str = None) -> dict:
         """Returns progressive timeline analysis for project visualization."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -1230,7 +1388,8 @@ class DBManager:
             if not prj:
                 return {}
 
-            tasks = self.get_tasks(project_id=project_id, include_hidden=False)
+            tasks = self.get_tasks(project_id=project_id, discipline_id=discipline_id,
+                                   assigned_head_id=assigned_head_id, include_hidden=False)
 
             task_timeline = []
             total_tasks = len(tasks)
@@ -1306,14 +1465,18 @@ class DBManager:
 
 
 class ClientQueueDBManager:
-    """Manages the local SQLite database for offline queuing on Head workstations."""
+    """
+    Local SQLite outbox on each workstation. Items are written here before they are sent,
+    and removed only after the Central Server confirms the write.
+    status: PENDING (will be sent / retried) or FAILED (server rejected it; needs user action).
+    """
     def __init__(self, queue_db_path: Path = CLIENT_QUEUE_DB_PATH):
         self.db_path = queue_db_path
         self.init_db()
 
     @contextmanager
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -1331,16 +1494,86 @@ class ClientQueueDBManager:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            cursor.execute("PRAGMA table_info(offline_queue)")
+            cols = [c["name"] for c in cursor.fetchall()]
+            if "user_id" not in cols:
+                cursor.execute("ALTER TABLE offline_queue ADD COLUMN user_id TEXT")
+            if "item_id" not in cols:
+                cursor.execute("ALTER TABLE offline_queue ADD COLUMN item_id TEXT")
+            if "status" not in cols:
+                cursor.execute("ALTER TABLE offline_queue ADD COLUMN status TEXT DEFAULT 'PENDING'")
+            if "last_error" not in cols:
+                cursor.execute("ALTER TABLE offline_queue ADD COLUMN last_error TEXT")
+            if "attempts" not in cols:
+                cursor.execute("ALTER TABLE offline_queue ADD COLUMN attempts INTEGER DEFAULT 0")
+            # Backfill item_id / user_id for rows written by older versions
+            cursor.execute("SELECT queue_id, payload_json FROM offline_queue WHERE item_id IS NULL")
+            for r in cursor.fetchall():
+                try:
+                    data = json.loads(r["payload_json"])
+                except Exception:
+                    data = {}
+                item_id = next((data.get(f) for f in ("log_id", "request_id", "proposal_id", "notification_id") if data.get(f)), None)
+                owner = data.get("employee_id") or data.get("proposed_by_id") or data.get("requested_by_id")
+                cursor.execute("UPDATE offline_queue SET item_id = ?, user_id = COALESCE(user_id, ?) WHERE queue_id = ?",
+                               (item_id or f"LEGACY-{r['queue_id']}", owner, r["queue_id"]))
             conn.commit()
 
-    def add_to_queue(self, event_type: str, payload_json: str):
+    def enqueue(self, user_id: str, event_type: str, item_id: str, payload: dict) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO offline_queue (event_type, payload_json) VALUES (?, ?)",
-                (event_type, payload_json)
-            )
+            cursor.execute("""INSERT INTO offline_queue (event_type, payload_json, user_id, item_id, status)
+                              VALUES (?, ?, ?, ?, 'PENDING')""",
+                           (event_type, json.dumps(payload), user_id, item_id))
             conn.commit()
+            return cursor.lastrowid
+
+    def get_items(self, user_id: str, status: str = None) -> list[dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = "SELECT * FROM offline_queue WHERE user_id = ?"
+            params = [user_id]
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            query += " ORDER BY queue_id ASC"
+            cursor.execute(query, tuple(params))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def count(self, user_id: str, status: str) -> int:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM offline_queue WHERE user_id = ? AND status = ?",
+                               (user_id, status)).fetchone()
+            return row["n"]
+
+    def delete_item(self, queue_id: int):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM offline_queue WHERE queue_id = ?", (queue_id,))
+            conn.commit()
+
+    def mark_attempt(self, queue_id: int):
+        with self.get_connection() as conn:
+            conn.execute("UPDATE offline_queue SET attempts = attempts + 1 WHERE queue_id = ?", (queue_id,))
+            conn.commit()
+
+    def mark_failed(self, queue_id: int, error: str):
+        with self.get_connection() as conn:
+            conn.execute("UPDATE offline_queue SET status = 'FAILED', last_error = ? WHERE queue_id = ?",
+                         (error, queue_id))
+            conn.commit()
+
+    def retry_item(self, queue_id: int):
+        with self.get_connection() as conn:
+            conn.execute("UPDATE offline_queue SET status = 'PENDING', last_error = NULL WHERE queue_id = ?",
+                         (queue_id,))
+            conn.commit()
+
+    # Kept for older callers/tests
+    def add_to_queue(self, event_type: str, payload_json: str):
+        data = json.loads(payload_json)
+        item_id = next((data.get(f) for f in ("log_id", "request_id", "proposal_id", "notification_id") if data.get(f)), None)
+        owner = data.get("employee_id") or data.get("proposed_by_id") or data.get("requested_by_id")
+        self.enqueue(owner, event_type, item_id or uuid.uuid4().hex, data)
 
     def get_all_queued(self) -> list[dict]:
         with self.get_connection() as conn:
@@ -1348,31 +1581,12 @@ class ClientQueueDBManager:
             cursor.execute("SELECT * FROM offline_queue ORDER BY queue_id ASC")
             return [dict(row) for row in cursor.fetchall()]
 
-    def delete_queued(self, queue_id: int):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM offline_queue WHERE queue_id = ?", (queue_id,))
-            conn.commit()
-
     def delete_queued_by_payload_id(self, event_type: str, item_id: str):
-        """Deletes item from queue when ACK is received with specific ID."""
         with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT queue_id, payload_json FROM offline_queue WHERE event_type = ?", (event_type,))
-            rows = cursor.fetchall()
-            for r in rows:
-                try:
-                    data = json.loads(r["payload_json"])
-                    for id_field in ("log_id", "request_id", "proposal_id", "notification_id"):
-                        if data.get(id_field) == item_id:
-                            cursor.execute("DELETE FROM offline_queue WHERE queue_id = ?", (r["queue_id"],))
-                            break
-                except Exception:
-                    pass
+            conn.execute("DELETE FROM offline_queue WHERE event_type = ? AND item_id = ?", (event_type, item_id))
             conn.commit()
 
     def clear_queue(self):
         with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM offline_queue")
+            conn.execute("DELETE FROM offline_queue")
             conn.commit()
