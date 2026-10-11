@@ -1,162 +1,369 @@
 import unittest
 import os
 import tempfile
-import asyncio
+import json
 from pathlib import Path
+from openpyxl import load_workbook
+import io
+
 from app.core.auth import hash_password, verify_password
+from app.core.config import ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN, DEFAULT_DISCIPLINES
 from app.database.db_manager import DBManager, ClientQueueDBManager
 from app.services.excel_service import ExcelExportService
 
-class TestOfflineApp(unittest.TestCase):
+class TestDeskAppSystem(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test_central.db"
         self.queue_db_path = Path(self.temp_dir.name) / "test_queue.db"
         
-        self.db = DBManager(central_db_path=self.db_path)
+        self.db = DBManager(central_db_path=self.db_path, standalone=True)
         self.queue_db = ClientQueueDBManager(queue_db_path=self.queue_db_path)
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def test_auth_hashing(self):
-        pwd = "SecretPassword123"
-        pwd_hash, pwd_salt = hash_password(pwd)
-        self.assertTrue(verify_password(pwd, pwd_hash, pwd_salt))
-        self.assertFalse(verify_password("WrongPassword", pwd_hash, pwd_salt))
+    def test_discipline_seeding(self):
+        """Discipline seeding: idempotent, correct display order, all default items exist."""
+        disciplines = self.db.get_disciplines()
+        disc_ids = [d["discipline_id"] for d in disciplines]
+        for expected_id, expected_name in DEFAULT_DISCIPLINES:
+            self.assertIn(expected_id, disc_ids)
 
-    def test_database_seeding_and_soft_delete(self):
+        # Idempotence test
+        self.db.seed_disciplines()
+        disciplines_after = self.db.get_disciplines()
+        self.assertEqual(len(disciplines), len(disciplines_after))
+
+    def test_multiple_heads_per_discipline(self):
+        """A discipline can have more than one Head (A3)."""
+        h1 = self.db.create_user(ROLE_SUPER_ADMIN, "bim_head_1", "Khalid Elsheikh", ROLE_HEAD, "BIM")
+        h2 = self.db.create_user(ROLE_SUPER_ADMIN, "bim_head_2", "Fawzy Refaat", ROLE_HEAD, "BIM")
+
+        self.assertEqual(h1["discipline_id"], "BIM")
+        self.assertEqual(h2["discipline_id"], "BIM")
+
+        bim_heads = self.db.get_users(role=ROLE_HEAD, discipline_id="BIM")
+        u_ids = [u["user_id"] for u in bim_heads]
+        self.assertIn("bim_head_1", u_ids)
+        self.assertIn("bim_head_2", u_ids)
+
+    def test_seed_heads_json_handling(self):
+        """seed_heads.json handling: placeholder skip, duplicate skip, no overwrite (A3.1)."""
+        json_file = Path(self.temp_dir.name) / "test_seed_heads.json"
+        seed_data = [
+            {"user_id": "<FINGERPRINT_ID>", "full_name": "Placeholder Guy", "discipline_id": "URB"},
+            {"user_id": "", "full_name": "Empty Guy", "discipline_id": "STR"},
+            {"user_id": "valid_head_1", "full_name": "Valid Head One", "discipline_id": "ARC"},
+            {"user_id": "valid_head_1", "full_name": "Duplicate Head", "discipline_id": "ARC"},
+            {"user_id": "valid_head_2", "full_name": "Valid Head Two", "discipline_id": "ELE"}
+        ]
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(seed_data, f)
+
+        self.db.seed_heads_from_file(json_file)
+
+        # Placeholders and empty IDs should not be in DB
+        self.assertIsNone(self.db.get_user("<FINGERPRINT_ID>"))
+        self.assertIsNone(self.db.get_user(""))
+
+        # Valid ones should exist
+        u1 = self.db.get_user("valid_head_1")
+        self.assertIsNotNone(u1)
+        self.assertEqual(u1["full_name"], "Valid Head One")
+        self.assertEqual(u1["discipline_id"], "ARC")
+
+        # Duplicate should not have overwritten u1
+        self.assertNotEqual(u1["full_name"], "Duplicate Head")
+
+        # Re-seeding should never overwrite existing user
+        seed_data_overwrite = [
+            {"user_id": "valid_head_1", "full_name": "Overwritten Name", "discipline_id": "INT"}
+        ]
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(seed_data_overwrite, f)
+        self.db.seed_heads_from_file(json_file)
+
+        u1_after = self.db.get_user("valid_head_1")
+        self.assertEqual(u1_after["full_name"], "Valid Head One")
+        self.assertEqual(u1_after["discipline_id"], "ARC")
+
+    def test_discipline_filtering_server_side(self):
+        """Server-side discipline filtering for Head vs Admin/COO (A1, A3)."""
+        # Create tasks in different disciplines
+        self.db.add_task("PRJ-01", "TSK-ARC-01", "Floor Plan Design", "ARC", "2026-10-01", "2026-10-10")
+        self.db.add_task("PRJ-01", "TSK-ELE-01", "Wiring Layout", "ELE", "2026-10-01", "2026-10-10")
+
+        # Head belonging to ARC
+        arc_tasks = self.db.get_tasks(project_id="PRJ-01", discipline_id="ARC")
+        self.assertTrue(all(t["discipline_id"] == "ARC" for t in arc_tasks))
+        t_ids = [t["task_id"] for t in arc_tasks]
+        self.assertIn("TSK-ARC-01", t_ids)
+        self.assertNotIn("TSK-ELE-01", t_ids)
+
+        # Admin query (no discipline filter) gets all
+        all_tasks = self.db.get_tasks(project_id="PRJ-01")
+        all_t_ids = [t["task_id"] for t in all_tasks]
+        self.assertIn("TSK-ARC-01", all_t_ids)
+        self.assertIn("TSK-ELE-01", all_t_ids)
+
+    def test_date_change_request_approve_reject(self):
+        """Per-task planned dates with change request approval/rejection flow (A2)."""
+        self.db.add_task("PRJ-01", "TSK-DCR", "Substation Wiring", "ELE", "2026-10-01", "2026-10-15")
+
+        # Head requests date change
+        req = self.db.create_task_date_change_request(
+            task_id="TSK-DCR",
+            requested_by_id="1001",
+            new_start_date="2026-10-05",
+            new_end_date="2026-10-25",
+            reason="Cable shipment delayed by supplier."
+        )
+        self.assertEqual(req["status"], "PENDING")
+        self.assertEqual(req["new_start_date"], "2026-10-05")
+        self.assertEqual(req["new_end_date"], "2026-10-25")
+
+        # Admin approves
+        appr = self.db.approve_task_date_change_request(req["request_id"], "admin")
+        self.assertEqual(appr["status"], "APPROVED")
+
+        # Verify task planned dates were updated in tasks table
+        task_after = self.db.get_tasks(project_id="PRJ-01", discipline_id="ELE")[0]
+        self.assertEqual(task_after["planned_start_date"], "2026-10-05")
+        self.assertEqual(task_after["planned_end_date"], "2026-10-25")
+
+        # Test Rejection flow
+        req2 = self.db.create_task_date_change_request(
+            task_id="TSK-DCR",
+            requested_by_id="1001",
+            new_start_date="2026-11-01",
+            new_end_date="2026-11-30",
+            reason="Requesting another month."
+        )
+        rej = self.db.reject_task_date_change_request(req2["request_id"], "admin", "Deadline cannot slip past October.")
+        self.assertEqual(rej["status"], "REJECTED")
+        self.assertEqual(rej["rejection_reason"], "Deadline cannot slip past October.")
+
+        # Dates should remain unchanged
+        task_still = self.db.get_tasks(project_id="PRJ-01", discipline_id="ELE")[0]
+        self.assertEqual(task_still["planned_start_date"], "2026-10-05")
+        self.assertEqual(task_still["planned_end_date"], "2026-10-25")
+
+    def test_head_discipline_enforcement_on_submit_log(self):
+        """Server rejects SUBMIT_LOG for a task outside the Head's discipline (A3)."""
+        # Create head in STR
+        self.db.create_user(ROLE_SUPER_ADMIN, "head_str", "Structural Head", ROLE_HEAD, "STR")
+        # Create head with no discipline
         with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Check default seed users
-            cursor.execute("SELECT * FROM users WHERE user_id = 'admin'")
-            admin = cursor.fetchone()
-            self.assertIsNotNone(admin)
-            self.assertEqual(admin["role"], "ADMIN")
-
-            # Check soft-delete on project
-            cursor.execute("UPDATE projects SET is_hidden = 1 WHERE project_id = 'PRJ-01'")
+            pwd_hash, pwd_salt = hash_password("head_nodisc")
+            conn.execute("INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)",
+                         ("head_nodisc", "No Disc Head", pwd_hash, pwd_salt, ROLE_HEAD, 0))
             conn.commit()
 
-            cursor.execute("SELECT * FROM projects WHERE project_id = 'PRJ-01'")
-            prj = cursor.fetchone()
-            self.assertEqual(prj["is_hidden"], 1)
+        self.db.add_task("PRJ-01", "TSK-MEC", "HVAC Ducting", "MEC", "2026-10-01", "2026-10-10")
+        self.db.add_task("PRJ-01", "TSK-STR", "Foundation Column", "STR", "2026-10-01", "2026-10-10")
 
-    def test_offline_queue(self):
-        self.queue_db.add_to_queue("SUBMIT_LOG", '{"log_id": "LOG-TEST", "employee_id": "1001"}')
-        queued = self.queue_db.get_all_queued()
-        self.assertEqual(len(queued), 1)
-        self.assertEqual(queued[0]["event_type"], "SUBMIT_LOG")
+        # STR head logging against MEC task -> must raise PermissionError
+        with self.assertRaises(PermissionError):
+            self.db.submit_progress_log({
+                "employee_id": "head_str",
+                "project_id": "PRJ-01",
+                "task_id": "TSK-MEC",
+                "start_date": "2026-10-02",
+                "end_date": "2026-10-02"
+            })
 
-        self.queue_db.delete_queued(queued[0]["queue_id"])
+        # Head with no discipline -> must raise PermissionError
+        with self.assertRaises(PermissionError):
+            self.db.submit_progress_log({
+                "employee_id": "head_nodisc",
+                "project_id": "PRJ-01",
+                "task_id": "TSK-STR",
+                "start_date": "2026-10-02",
+                "end_date": "2026-10-02"
+            })
+
+        # STR head logging against STR task -> succeeds
+        log = self.db.submit_progress_log({
+            "employee_id": "head_str",
+            "project_id": "PRJ-01",
+            "task_id": "TSK-STR",
+            "start_date": "2026-10-02",
+            "end_date": "2026-10-02",
+            "assigned_to": "Worker John"
+        })
+        self.assertEqual(log["discipline_id"], "STR")
+        self.assertEqual(log["assigned_to"], "Worker John")
+
+    def test_excel_export_with_discipline_filters_and_sheets(self):
+        """Excel export with discipline categorization and multi-sheet structure (A4)."""
+        self.db.create_user(ROLE_SUPER_ADMIN, "head_urb", "Urban Head", ROLE_HEAD, "URB")
+        self.db.create_user(ROLE_SUPER_ADMIN, "head_bim", "BIM Head", ROLE_HEAD, "BIM")
+        self.db.add_task("PRJ-01", "TSK-URB", "City Master Plan", "URB", "2026-10-01", "2026-10-10")
+        self.db.add_task("PRJ-01", "TSK-BIM", "Revit Coordination", "BIM", "2026-10-01", "2026-10-10")
+
+        self.db.submit_progress_log({
+            "employee_id": "head_urb", "project_id": "PRJ-01", "task_id": "TSK-URB",
+            "start_date": "2026-10-01", "end_date": "2026-10-01", "assigned_to": "Planner Ali"
+        })
+        self.db.submit_progress_log({
+            "employee_id": "head_bim", "project_id": "PRJ-01", "task_id": "TSK-BIM",
+            "start_date": "2026-10-01", "end_date": "2026-10-01", "assigned_to": "Modeller Sam"
+        })
+
+        excel_service = ExcelExportService(self.db)
+        out_bytes = excel_service.export_logs_to_excel(discipline_id=None)
+
+        wb = load_workbook(io.BytesIO(out_bytes))
+        sheet_names = wb.sheetnames
+        self.assertIn("All Logs", sheet_names)
+        self.assertIn("Urban", sheet_names)
+        self.assertIn("BIM", sheet_names)
+
+        # Check headers of All Logs
+        ws_all = wb["All Logs"]
+        headers = [cell.value for cell in ws_all[1]]
+        self.assertIn("Head Discipline", headers)
+        self.assertIn("Task Discipline", headers)
+        self.assertIn("Assigned To", headers)
+
+    def test_assigned_to_persistence(self):
+        """Assigned To field persistence on progress_logs (A5)."""
+        self.db.create_user(ROLE_SUPER_ADMIN, "h_qc", "QC Head", ROLE_HEAD, "QC")
+        self.db.add_task("PRJ-01", "TSK-QC", "Quality Audit", "QC", "2026-10-01", "2026-10-05")
+
+        log = self.db.submit_progress_log({
+            "log_id": "LOG-ASSIGN-01",
+            "employee_id": "h_qc",
+            "project_id": "PRJ-01",
+            "task_id": "TSK-QC",
+            "start_date": "2026-10-02",
+            "end_date": "2026-10-02",
+            "assigned_to": "Eng. Tarek"
+        })
+        self.assertEqual(log["assigned_to"], "Eng. Tarek")
+
+        # Query from DB
+        logs = self.db.get_progress_logs(project_id="PRJ-01")
+        logged_assign = next(l["assigned_to"] for l in logs if l["log_id"] == "LOG-ASSIGN-01")
+        self.assertEqual(logged_assign, "Eng. Tarek")
+
+    def test_server_side_login(self):
+        """Server-side login verification and password changes (B1)."""
+        u = self.db.get_user("admin")
+        self.assertTrue(verify_password("admin", u["password_hash"], u["password_salt"]))
+        self.assertFalse(verify_password("wrong", u["password_hash"], u["password_salt"]))
+
+        # Password change
+        self.db.change_password("admin", "new_admin_pass", old_password="admin")
+        u_after = self.db.get_user("admin")
+        self.assertTrue(verify_password("new_admin_pass", u_after["password_hash"], u_after["password_salt"]))
+        self.assertEqual(u_after["must_change_password"], 0)
+
+    def test_ack_based_queue_with_duplicate_resend(self):
+        """Reliable offline queue with ACK deletion and duplicate resilience (B4)."""
+        payload = {
+            "log_id": "LOG-UUID-UNIQUE-1",
+            "employee_id": "1001",
+            "project_id": "PRJ-01",
+            "task_id": "TSK-02",
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-01"
+        }
+        # Client enqueues before sending
+        self.queue_db.add_to_queue("SUBMIT_LOG", json.dumps(payload))
+        self.assertEqual(len(self.queue_db.get_all_queued()), 1)
+
+        # Server writes
+        self.db.submit_progress_log(payload)
+        # Server writes duplicate resend -> idempotent, no error or extra record
+        self.db.submit_progress_log(payload)
+
+        # Verify only 1 record exists in DB
+        logs = [l for l in self.db.get_progress_logs() if l["log_id"] == "LOG-UUID-UNIQUE-1"]
+        self.assertEqual(len(logs), 1)
+
+        # Client receives ACK and deletes from queue
+        self.queue_db.delete_queued_by_payload_id("SUBMIT_LOG", "LOG-UUID-UNIQUE-1")
         self.assertEqual(len(self.queue_db.get_all_queued()), 0)
 
-    def test_excel_export(self):
-        excel_service = ExcelExportService(self.db)
-        output_xlsx = Path(self.temp_dir.name) / "test_report.xlsx"
-        result_path = excel_service.export_logs_to_excel(str(output_xlsx))
-        self.assertTrue(os.path.exists(result_path))
+    def test_role_permissions_enforced(self):
+        """Admin can only create/manage HEAD accounts. Super Admin can manage all (B5)."""
+        # Admin trying to create another ADMIN -> must raise PermissionError
+        with self.assertRaises(PermissionError):
+            self.db.create_user(ROLE_ADMIN, "admin_new", "Admin Two", ROLE_ADMIN)
 
-    def test_revision_counter(self):
-        # Initial revision count should be 1
-        rev1 = self.db.get_next_revision_number("1001", "PRJ-01", "TSK-01")
-        self.assertEqual(rev1, 1)
+        # Admin trying to create COO -> must raise PermissionError
+        with self.assertRaises(PermissionError):
+            self.db.create_user(ROLE_ADMIN, "coo_new", "COO Two", ROLE_COO)
 
-        # Insert a REVISION log
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            INSERT INTO progress_logs (log_id, employee_id, project_id, task_id, start_date, end_date, progress_stage, entry_type, revision_number)
-            VALUES ('LOG-REV1', '1001', 'PRJ-01', 'TSK-01', '2026-09-23', '2026-09-23', 'Revision', 'REVISION', 1)
-            """)
-            conn.commit()
+        # Admin creating HEAD -> succeeds
+        head = self.db.create_user(ROLE_ADMIN, "head_permitted", "Allowed Head", ROLE_HEAD, "URB")
+        self.assertEqual(head["role"], ROLE_HEAD)
 
-        # Next revision count should be 2
-        rev2 = self.db.get_next_revision_number("1001", "PRJ-01", "TSK-01")
-        self.assertEqual(rev2, 2)
+        # Super Admin creating ADMIN -> succeeds
+        adm = self.db.create_user(ROLE_SUPER_ADMIN, "super_created_adm", "Created Admin", ROLE_ADMIN)
+        self.assertEqual(adm["role"], ROLE_ADMIN)
 
-    def test_analysis_queries(self):
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Insert sample logs for analysis testing
-            cursor.execute("""
-            INSERT INTO progress_logs (log_id, employee_id, project_id, task_id, start_date, end_date, progress_stage, entry_type, revision_number)
-            VALUES ('LOG-A1', '1001', 'PRJ-01', 'TSK-01', '2026-09-24', '2026-09-24', 'Done', 'NEW', 0)
-            """)
-            cursor.execute("""
-            INSERT INTO progress_logs (log_id, employee_id, project_id, task_id, start_date, end_date, progress_stage, entry_type, revision_number)
-            VALUES ('LOG-A2', '1001', 'PRJ-01', 'TSK-01', '2026-09-25', '2026-09-25', 'Revision', 'REVISION', 1)
-            """)
-            conn.commit()
+    def test_database_backup(self):
+        """Automatic daily SQLite database backup API (B6)."""
+        backup_path = self.db.backup_database()
+        self.assertIsNotNone(backup_path)
+        self.assertTrue(os.path.exists(backup_path))
 
-            cursor.execute("SELECT COUNT(*) AS count FROM progress_logs WHERE entry_type = 'REVISION'")
-            total_revs = cursor.fetchone()["count"]
-            self.assertEqual(total_revs, 1)
+    def test_sync_auth_callable_from_running_event_loop(self):
+        """Verify sync_authenticate_server safely runs inside an active asyncio/qasync loop without RuntimeError."""
+        import asyncio
+        from app.network.client import NetworkClient
+        async def mock_running_loop():
+            try:
+                NetworkClient.sync_authenticate_server("127.0.0.1", 19999, "admin", "admin", timeout=0.5)
+            except Exception as e:
+                self.assertNotIsInstance(e, RuntimeError)
+                self.assertNotIn("cannot be called from a running event loop", str(e))
 
-            cursor.execute("""
-            SELECT u.user_id,
-                   COUNT(l.log_id) AS total_logs,
-                   SUM(CASE WHEN l.entry_type = 'REVISION' THEN 1 ELSE 0 END) AS rev_logs
-            FROM users u
-            LEFT JOIN progress_logs l ON u.user_id = l.employee_id
-            WHERE u.user_id = '1001'
-            GROUP BY u.user_id
-            """)
-            emp_stat = cursor.fetchone()
-            self.assertEqual(emp_stat["total_logs"], 2)
-            self.assertEqual(emp_stat["rev_logs"], 1)
+    def test_task_assigned_to_head_and_autoid(self):
+        """Verify Admin task creation with assigned_head_id, auto-ID generation, and Head visibility filtering."""
+        # 1. Test auto-generation when task_id starts with MSG-
+        t1 = self.db.add_task(
+            project_id="PRJ-01",
+            task_id="MSG-ABCD1234",
+            name="HVAC Zone 1 Ducting",
+            discipline_id="MEC",
+            planned_start_date="2026-10-01",
+            planned_end_date="2026-10-10",
+            assigned_head_id="5026"  # Abdallah Behiry
+        )
+        self.assertFalse(t1["task_id"].startswith("MSG-"))
+        self.assertEqual(t1["assigned_head_id"], "5026")
 
-    def test_task_id_generation(self):
-        next_id = self.db.generate_next_task_id("PRJ-01")
-        self.assertEqual(next_id, "TSK-04")
+        # 2. Test get_tasks filtering by assigned_head_id
+        tasks_for_5026 = self.db.get_tasks(project_id="PRJ-01", discipline_id="MEC", assigned_head_id="5026")
+        self.assertTrue(any(t["task_id"] == t1["task_id"] for t in tasks_for_5026))
 
-    def test_task_proposal_approval_flow(self):
-        # 1. Propose task
-        prop = self.db.create_task_proposal("PRJ-01", "Core Router Setup", "1001")
-        self.assertEqual(prop["status"], "PENDING")
-        self.assertEqual(prop["task_id"], "TSK-04")
-        self.assertEqual(prop["proposed_by_id"], "1001")
+        # Another head in same or other discipline should NOT see specifically assigned task
+        tasks_for_other = self.db.get_tasks(project_id="PRJ-01", discipline_id="MEC", assigned_head_id="9999")
+        self.assertFalse(any(t["task_id"] == t1["task_id"] for t in tasks_for_other))
 
-        # 2. Query pending proposals
-        pending = self.db.get_task_proposals(status="PENDING")
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["task_name"], "Core Router Setup")
+        # 3. Test update_task
+        upd = self.db.update_task(t1["task_id"], name="HVAC Zone 1 Ducting (Updated)", assigned_head_id=None)
+        self.assertEqual(upd["name"], "HVAC Zone 1 Ducting (Updated)")
+        self.assertIsNone(upd["assigned_head_id"])
 
-        # 3. Approve proposal
-        approved = self.db.approve_task_proposal(prop["proposal_id"], "admin")
-        self.assertEqual(approved["status"], "APPROVED")
-        self.assertEqual(approved["admin_id"], "admin")
+        # Now that assigned_head_id is None, it is visible to any head in MEC
+        tasks_now = self.db.get_tasks(project_id="PRJ-01", discipline_id="MEC", assigned_head_id="9999")
+        self.assertTrue(any(t["task_id"] == t1["task_id"] for t in tasks_now))
 
-        # 4. Verify task exists in tasks table
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM tasks WHERE task_id = 'TSK-04'")
-            task_row = cursor.fetchone()
-            self.assertIsNotNone(task_row)
-            self.assertEqual(task_row["name"], "Core Router Setup")
-            self.assertEqual(task_row["proposed_by_id"], "1001")
-
-        # 5. Verify pending list is now empty and next auto-id is TSK-05
-        self.assertEqual(len(self.db.get_task_proposals(status="PENDING")), 0)
-        self.assertEqual(self.db.generate_next_task_id("PRJ-01"), "TSK-05")
-
-    def test_task_proposal_rejection_flow(self):
-        # 1. Propose task
-        prop = self.db.create_task_proposal("PRJ-01", "Duplicate Task", "1001")
-        
-        # 2. Reject proposal with reason
-        rejected = self.db.reject_task_proposal(prop["proposal_id"], "admin", "Out of current project scope")
-        self.assertEqual(rejected["status"], "REJECTED")
-        self.assertEqual(rejected["rejection_reason"], "Out of current project scope")
-
-        # 3. Verify task was NOT inserted into active tasks table
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM tasks WHERE name = 'Duplicate Task'")
-            self.assertIsNone(cursor.fetchone())
+    def test_project_timeline_data_structure(self):
+        """Verify get_project_timeline_data returns progressive timeline metrics and task details."""
+        self.db.add_task("PRJ-01", "TSK-TL-01", "Timeline Arch Task", "ARC", "2026-10-01", "2026-10-15")
+        tl_data = self.db.get_project_timeline_data("PRJ-01")
+        self.assertIn("project_id", tl_data)
+        self.assertIn("tasks", tl_data)
+        self.assertIn("overall_progress_percentage", tl_data)
+        self.assertTrue(any(t["task_id"] == "TSK-TL-01" for t in tl_data["tasks"]))
 
 if __name__ == "__main__":
     unittest.main()
+
 

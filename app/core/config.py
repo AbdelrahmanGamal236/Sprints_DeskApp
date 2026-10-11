@@ -14,6 +14,9 @@ else:
 
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+BACKUPS_DIR = DATA_DIR / "backups"
+BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+SEED_HEADS_PATH = DATA_DIR / "seed_heads.json"
 
 # Database Paths
 CENTRAL_DB_PATH = DATA_DIR / "central_app.db"
@@ -43,3 +46,17 @@ ROLE_COO = "COO"
 ROLE_SUPER_ADMIN = "SUPER_ADMIN"
 
 ALL_ROLES = [ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN]
+
+# Default Disciplines (idempotent seeding list in specified display order)
+DEFAULT_DISCIPLINES = [
+    ("URB", "Urban"),
+    ("STR", "Structure"),
+    ("INT", "Interior"),
+    ("ARC", "Architectural"),
+    ("BIM", "BIM"),
+    ("MEC", "Mechanical"),
+    ("ELE", "Electrical"),
+    ("AI", "AI"),
+    ("QC", "QC"),
+    ("Infrastructure", "Infrastructure")
+]

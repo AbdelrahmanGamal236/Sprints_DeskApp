@@ -1,7 +1,8 @@
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, 
-    QFrame, QWidget, QApplication
+    QFrame, QWidget, QApplication, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView, QSplitter
 )
 
 class ToastNotifier(QFrame):
@@ -146,4 +147,240 @@ class CopyrightFooter(QLabel):
         super().__init__("© All Rights Reserved to Eng. Abdelrahman Gamal & Eng. Tolimy", parent)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("font-size: 11px; color: #64748B; padding: 6px; font-weight: 500;")
+
+
+# =========================================================================
+# MODERN TABLE UI & COMPONENT HELPERS
+# =========================================================================
+
+def setup_modern_table(table: QTableWidget, row_height: int = 46, min_col_width: int = 80):
+    """
+    Standardizes table appearance across all workspaces:
+    - Consistent row height so buttons never overlap adjacent rows
+    - Full row selection with dark zinc/purple theme highlight
+    - Text centering & clean scrollbars
+    - Protection against clipped text and ugly borders
+    """
+    table.verticalHeader().setDefaultSectionSize(row_height)
+    table.verticalHeader().setMinimumSectionSize(row_height)
+    table.verticalHeader().setVisible(True)
+    table.verticalHeader().setHighlightSections(False)
+    
+    table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+    table.horizontalHeader().setMinimumSectionSize(min_col_width)
+    table.horizontalHeader().setHighlightSections(False)
+    
+    table.setSelectionBehavior(QAbstractItemView.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SingleSelection)
+    table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    table.setAlternatingRowColors(True)
+    table.setShowGrid(True)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+
+def create_table_action_cell(buttons: list[QPushButton]) -> QWidget:
+    """
+    Wraps action button(s) in a dedicated container cell with generous margins and padding.
+    Guarantees buttons never touch borders or bleed into neighboring rows.
+    """
+    widget = QWidget()
+    layout = QHBoxLayout(widget)
+    layout.setContentsMargins(6, 4, 6, 4)
+    layout.setSpacing(8)
+    layout.setAlignment(Qt.AlignCenter)
+    for btn in buttons:
+        btn.setFixedHeight(28)
+        btn.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(btn)
+    return widget
+
+
+def create_table_item(text: str, align: Qt.AlignmentFlag = Qt.AlignCenter, tooltip: str = None) -> QTableWidgetItem:
+    """
+    Creates a styled QTableWidgetItem with guaranteed alignment and hover tooltip
+    to prevent text truncation frustration.
+    """
+    val = str(text) if text is not None else ""
+    item = QTableWidgetItem(val)
+    item.setTextAlignment(align)
+    item.setToolTip(tooltip if tooltip is not None else val)
+    return item
+
+
+class KpiMetricCard(QFrame):
+    """
+    Executive-level Dashboard KPI Card.
+    Features: Category label, bold numerical metric, subtitle, left accent border, and icon badge.
+    """
+    def __init__(self, title: str, initial_value: str = "0", icon: str = "📊", accent_color: str = "#8B5CF6", subtitle: str = "", parent=None):
+        super().__init__(parent)
+        self.setObjectName("KpiCard")
+        self.accent_color = accent_color
+        self.setFixedHeight(84)
+        self.setStyleSheet(f"QFrame#KpiCard {{ border-left: 4px solid {accent_color}; }}")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+
+        # Left Info Stack
+        left_stack = QVBoxLayout()
+        left_stack.setSpacing(2)
+
+        self.lbl_title = QLabel(title.upper(), self)
+        self.lbl_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #94A3B8; letter-spacing: 0.5px;")
+        left_stack.addWidget(self.lbl_title)
+
+        self.lbl_value = QLabel(initial_value, self)
+        self.lbl_value.setStyleSheet(f"font-size: 24px; font-weight: 800; color: #FFFFFF;")
+        left_stack.addWidget(self.lbl_value)
+
+        if subtitle:
+            lbl_sub = QLabel(subtitle, self)
+            lbl_sub.setStyleSheet("font-size: 11px; color: #64748B;")
+            left_stack.addWidget(lbl_sub)
+
+        left_stack.addStretch()
+        layout.addLayout(left_stack, 1)
+
+        # Right Icon Badge
+        self.icon_badge = QLabel(icon, self)
+        self.icon_badge.setAlignment(Qt.AlignCenter)
+        self.icon_badge.setFixedSize(38, 38)
+        self.icon_badge.setStyleSheet(f"""
+            background-color: {accent_color}22;
+            color: {accent_color};
+            border-radius: 8px;
+            font-size: 18px;
+        """)
+        layout.addWidget(self.icon_badge)
+
+    def set_value(self, val):
+        self.lbl_value.setText(str(val))
+
+
+class CollapsiblePanel(QFrame):
+    """
+    A resizable and collapsible panel (A6).
+    Integrated with QSplitter: when collapsed, frees up screen real estate
+    smoothly without creating an empty void or distorted box.
+    """
+    toggled = Signal(bool)
+
+    def __init__(self, title: str, content_widget: QWidget, horizontal: bool = True, parent=None):
+        super().__init__(parent)
+        self.setObjectName("CollapsiblePanel")
+        self.title_text = title
+        self.horizontal = horizontal
+        self.is_collapsed = False
+        self.content_widget = content_widget
+        self._saved_sizes = None
+
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(6, 6, 6, 6)
+        self.main_layout.setSpacing(6)
+
+        # Header Bar Widget
+        self.header_frame = QFrame(self)
+        self.header_frame.setObjectName("CollapsibleHeader")
+        h_layout = QHBoxLayout(self.header_frame)
+        h_layout.setContentsMargins(10, 6, 10, 6)
+        h_layout.setSpacing(8)
+
+        self.header_label = QLabel(title, self.header_frame)
+        self.header_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #E4E4E7;")
+        h_layout.addWidget(self.header_label)
+        h_layout.addStretch()
+
+        self.btn_toggle = QPushButton(self.header_frame)
+        self.btn_toggle.setObjectName("CollapseToggle")
+        self.btn_toggle.setFixedSize(28, 24)
+        self.btn_toggle.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle.setText("◀" if horizontal else "▲")
+        self.btn_toggle.setToolTip(f"Collapse {title}")
+        self.btn_toggle.clicked.connect(self.toggle_collapsed)
+        h_layout.addWidget(self.btn_toggle)
+
+        self.main_layout.addWidget(self.header_frame)
+        self.main_layout.addWidget(self.content_widget, 1)
+
+    def toggle_collapsed(self):
+        self.set_collapsed(not self.is_collapsed)
+
+    def _get_parent_splitter(self) -> QSplitter | None:
+        p = self.parentWidget()
+        if isinstance(p, QSplitter):
+            return p
+        if p and isinstance(p.parentWidget(), QSplitter):
+            return p.parentWidget()
+        if isinstance(self.parent(), QSplitter):
+            return self.parent()
+        return None
+
+    def set_collapsed(self, collapsed: bool):
+        self.is_collapsed = collapsed
+        splitter = self._get_parent_splitter()
+
+        if collapsed:
+            self.content_widget.setVisible(False)
+            if self.horizontal:
+                self.header_label.setVisible(False)
+                self.btn_toggle.setText("▶")
+                self.btn_toggle.setToolTip(f"Expand {self.title_text}")
+                if splitter:
+                    self._saved_sizes = splitter.sizes()
+                    idx = splitter.indexOf(self)
+                    if idx >= 0 and len(self._saved_sizes) >= 2:
+                        new_sizes = list(self._saved_sizes)
+                        collapsed_size = 44
+                        freed = max(0, new_sizes[idx] - collapsed_size)
+                        other_idx = 1 if idx == 0 else 0
+                        new_sizes[other_idx] += freed
+                        new_sizes[idx] = collapsed_size
+                        self.setFixedWidth(collapsed_size)
+                        splitter.setSizes(new_sizes)
+                    else:
+                        self.setFixedWidth(44)
+                else:
+                    self.setFixedWidth(44)
+            else:
+                self.btn_toggle.setText("▼")
+                self.btn_toggle.setToolTip(f"Expand {self.title_text}")
+                h_size = self.header_frame.sizeHint().height() + 14
+                if splitter:
+                    self._saved_sizes = splitter.sizes()
+                    idx = splitter.indexOf(self)
+                    if idx >= 0 and len(self._saved_sizes) >= 2:
+                        new_sizes = list(self._saved_sizes)
+                        freed = max(0, new_sizes[idx] - h_size)
+                        other_idx = 1 if idx == 0 else 0
+                        new_sizes[other_idx] += freed
+                        new_sizes[idx] = h_size
+                        self.setFixedHeight(h_size)
+                        splitter.setSizes(new_sizes)
+                    else:
+                        self.setFixedHeight(h_size)
+                else:
+                    self.setFixedHeight(h_size)
+        else:
+            self.content_widget.setVisible(True)
+            self.header_label.setVisible(True)
+            if self.horizontal:
+                self.btn_toggle.setText("◀")
+                self.btn_toggle.setToolTip(f"Collapse {self.title_text}")
+                self.setMinimumWidth(0)
+                self.setMaximumWidth(16777215)
+                if splitter and self._saved_sizes:
+                    splitter.setSizes(self._saved_sizes)
+            else:
+                self.btn_toggle.setText("▲")
+                self.btn_toggle.setToolTip(f"Collapse {self.title_text}")
+                self.setMinimumHeight(0)
+                self.setMaximumHeight(16777215)
+                if splitter and self._saved_sizes:
+                    splitter.setSizes(self._saved_sizes)
+
+        self.toggled.emit(collapsed)
+
 

@@ -24,20 +24,21 @@ def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex((host, port)) == 0
 
-async def run_server_task(host: str = "0.0.0.0", port: int = DEFAULT_WS_PORT):
-    server = CentralWebSocketServer(host=host, port=port)
+async def run_server_task(host: str = "0.0.0.0", port: int = DEFAULT_WS_PORT, standalone: bool = False):
+    server = CentralWebSocketServer(host=host, port=port, standalone=standalone)
     await server.start()
 
-async def async_main(app, db_manager, args):
-    # Automatically start embedded server if local server port is free
-    if not is_port_in_use(args.port, "127.0.0.1"):
-        logging.info("Starting embedded Central Server task on port %d...", args.port)
-        asyncio.create_task(run_server_task("0.0.0.0", args.port))
-        await asyncio.sleep(0.1)
+async def async_main(app, args):
+    # Only start embedded server if explicitly requested via --standalone (B3)
+    if getattr(args, "standalone", False):
+        if not is_port_in_use(args.port, "127.0.0.1"):
+            logging.info("Starting standalone embedded Central Server task on port %d...", args.port)
+            asyncio.create_task(run_server_task("0.0.0.0", args.port, standalone=True))
+            await asyncio.sleep(0.2)
 
     while True:
-        # Open Login Dialog
-        login_dialog = LoginDialog(db_manager, default_server_ip=args.server_ip)
+        # Open Login Dialog (Server-side auth - B1)
+        login_dialog = LoginDialog(default_server_ip=args.server_ip, port=args.port)
         if login_dialog.exec() != LoginDialog.Accepted:
             break
 
@@ -53,15 +54,15 @@ async def async_main(app, db_manager, args):
         # Start network client background loop in qasync
         net_task = asyncio.create_task(net_client.start())
 
-        # Open workspace based on role
+        # Open workspace based on role (B2: client passes None or dummy for direct DB)
         if role == ROLE_HEAD:
-            workspace = HeadWorkspace(user, db_manager, net_client, sync_service)
+            workspace = HeadWorkspace(user, None, net_client, sync_service)
         elif role == ROLE_ADMIN:
-            workspace = AdminWorkspace(user, db_manager, net_client)
+            workspace = AdminWorkspace(user, None, net_client)
         elif role == ROLE_COO:
-            workspace = CooWorkspace(user, db_manager, net_client)
+            workspace = CooWorkspace(user, None, net_client)
         elif role == ROLE_SUPER_ADMIN:
-            workspace = SuperAdminWorkspace(user, db_manager, net_client)
+            workspace = SuperAdminWorkspace(user, None, net_client)
         else:
             logging.error(f"Unknown role '{role}'")
             break
@@ -92,7 +93,8 @@ async def async_main(app, db_manager, args):
 
 def main():
     parser = argparse.ArgumentParser(description="Offline Progress Logging & Task Management System")
-    parser.add_argument("--server-only", action="store_true", help="Run dedicated Central Server headless mode")
+    parser.add_argument("--server-only", action="store_true", help="Run dedicated Central Server headless daemon mode")
+    parser.add_argument("--standalone", action="store_true", help="Run embedded server + client in one process for single-PC testing")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host address for Central Server")
     parser.add_argument("--port", type=int, default=DEFAULT_WS_PORT, help="Port for Central Server")
     parser.add_argument("--server-ip", type=str, default="127.0.0.1", help="Central Server LAN IP")
@@ -107,7 +109,7 @@ def main():
             input("Press Enter to exit...")
             sys.exit(1)
         try:
-            asyncio.run(run_server_task(args.host, args.port))
+            asyncio.run(run_server_task(args.host, args.port, standalone=False))
         except KeyboardInterrupt:
             logging.info("Central Server stopped.")
         except OSError as e:
@@ -124,11 +126,9 @@ def main():
     event_loop = QEventLoop(app)
     asyncio.set_event_loop(event_loop)
 
-    db_manager = DBManager()
-
     try:
         with event_loop:
-            event_loop.run_until_complete(async_main(app, db_manager, args))
+            event_loop.run_until_complete(async_main(app, args))
     except (RuntimeError, SystemExit, KeyboardInterrupt):
         pass
 

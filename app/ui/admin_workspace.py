@@ -1,37 +1,49 @@
-from PySide6.QtCore import Qt
+import base64
+import json
+from datetime import datetime
+from PySide6.QtCore import Qt, QDate, QSettings
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QFrame, QListWidget, QListWidgetItem, 
-    QComboBox, QTabWidget, QMessageBox, QFileDialog, QTableWidget, 
-    QTableWidgetItem, QHeaderView, QInputDialog
+    QLineEdit, QPushButton, QFrame, QComboBox, QTabWidget, 
+    QMessageBox, QFileDialog, QTableWidget, QTableWidgetItem, 
+    QHeaderView, QInputDialog, QSplitter, QDateEdit
 )
-from app.core.config import ROLE_HEAD, ROLE_COO, ROLE_ADMIN
-from app.core.auth import hash_password
-from app.database.db_manager import DBManager
+from app.core.config import ROLE_HEAD, ROLE_COO, ROLE_ADMIN, ROLE_SUPER_ADMIN
 from app.network.client import NetworkClient
-from app.services.excel_service import ExcelExportService
-from app.ui.components import ToastNotifier, CopyrightFooter
+from app.ui.components import (
+    ToastNotifier, CopyrightFooter, CollapsiblePanel,
+    setup_modern_table, create_table_action_cell, create_table_item, KpiMetricCard
+)
+from app.ui.timeline_widget import ProjectProgressiveTimelineWidget
 
 class AdminWorkspace(QMainWindow):
-    """Admin Management Workspace."""
-    def __init__(self, user_dict: dict, db_manager: DBManager, net_client: NetworkClient):
+    """Admin Management Workspace with Discipline Organization & Server Enforcement."""
+    def __init__(self, user_dict: dict, db_manager, net_client: NetworkClient):
         super().__init__()
         self.user = user_dict
         self.db = db_manager
         self.net_client = net_client
-        self.excel_service = ExcelExportService(self.db)
         self.logout_requested = False
 
-        self.setWindowTitle(f"Admin Workspace - {self.user['user_id']}")
-        self.setMinimumSize(950, 680)
+        self.disciplines_data = []
+        self.projects_data = []
+        self.tasks_data = []
+        self.users_data = []
+        self.pending_proposals_data = []
+        self.pending_date_changes_data = []
+
+        self.setWindowTitle(f"Admin Workspace - {self.user.get('full_name', self.user['user_id'])}")
+        self.setMinimumSize(1050, 750)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(10)
 
         # Header
         top_bar = QHBoxLayout()
-        header = QLabel("Admin Workspace", self)
+        header = QLabel(f"Admin Control Center - {self.user.get('full_name') or self.user['user_id']}", self)
         header.setObjectName("HeaderTitle")
         top_bar.addWidget(header)
         top_bar.addStretch()
@@ -40,158 +52,263 @@ class AdminWorkspace(QMainWindow):
         btn_logout.setObjectName("DangerButton")
         btn_logout.clicked.connect(self.on_logout)
         top_bar.addWidget(btn_logout)
-
         main_layout.addLayout(top_bar)
 
         self.toast = ToastNotifier(self)
         main_layout.addWidget(self.toast)
 
-        # Tab Widget
-        tabs = QTabWidget(self)
+        # Tabs
+        self.tabs = QTabWidget(self)
+        self.tabs.addTab(self.create_employee_tab(), "Manage Heads & Users")
+        self.tabs.addTab(self.create_project_tab(), "Manage Projects")
+        self.tabs.addTab(self.create_task_tab(), "Manage Tasks & Disciplines")
+        self.tabs.addTab(self.create_timeline_tab(), "Project Timeline & Progress")
+        self.tabs.addTab(self.create_analysis_tab(), "Analysis & Revision Insights")
+        self.tabs.addTab(self.create_export_tab(), "Excel Reports")
+        main_layout.addWidget(self.tabs)
 
-        # Tab 1: User & Employee Management
-        tabs.addTab(self.create_employee_tab(), "Manage Users & Employees")
-
-        # Tab 2: Project Management
-        tabs.addTab(self.create_project_tab(), "Manage Projects")
-
-        # Tab 3: Task Management
-        tabs.addTab(self.create_task_tab(), "Manage Tasks")
-
-        # Tab 4: Revision & Performance Analysis
-        tabs.addTab(self.create_analysis_tab(), "Analysis & Revision Insights")
-
-        # Tab 5: Excel Export
-        tabs.addTab(self.create_export_tab(), "Excel Reports")
-
-        main_layout.addWidget(tabs)
         main_layout.addWidget(CopyrightFooter(self))
 
-        # Network signal bindings
+        # Network bindings
         self.net_client.task_proposal_event.connect(self.on_task_proposal_event)
+        self.net_client.task_date_change_event.connect(self.on_task_date_change_event)
         self.net_client.global_refresh_received.connect(self.reload_all_data)
+        self.net_client.response_received.connect(self.on_server_response)
 
         self.reload_all_data()
 
-    # ------------------- EMPLOYEE TAB -------------------
+    # ------------------- DATA RELOAD VIA SERVER (B2) -------------------
+    def reload_all_data(self):
+        self.net_client.send_action("GET_DISCIPLINES", {"include_hidden": True})
+        self.net_client.send_action("GET_PROJECTS", {"include_hidden": True})
+        self.net_client.send_action("GET_TASKS", {"include_hidden": True})
+        self.net_client.send_action("GET_USERS", {})
+        self.net_client.send_action("GET_TASK_PROPOSALS", {})
+        self.net_client.send_action("GET_DATE_CHANGE_REQUESTS", {})
+        self.net_client.send_action("GET_ANALYTICS", {})
+        self.on_timeline_project_selected()
+
+    def on_server_response(self, resp_type: str, data: dict):
+        if resp_type == "DISCIPLINES_RESPONSE":
+            self.disciplines_data = data.get("disciplines", [])
+            self.update_disciplines_views()
+        elif resp_type == "PROJECTS_RESPONSE":
+            self.projects_data = data.get("projects", [])
+            self.update_projects_views()
+        elif resp_type == "TASKS_RESPONSE":
+            self.tasks_data = data.get("tasks", [])
+            self.update_tasks_views()
+            self.on_timeline_project_selected()
+        elif resp_type == "USERS_RESPONSE":
+            self.users_data = data.get("users", [])
+            self.update_users_views()
+        elif resp_type == "TASK_PROPOSALS_RESPONSE":
+            self.update_proposals_views(data.get("proposals", []))
+        elif resp_type == "DATE_CHANGE_REQUESTS_RESPONSE":
+            self.update_date_change_views(data.get("requests", []))
+        elif resp_type == "ANALYTICS_RESPONSE":
+            self.update_analytics_views(data.get("data", {}))
+        elif resp_type == "PROJECT_TIMELINE_RESPONSE":
+            if hasattr(self, "timeline_widget"):
+                self.timeline_widget.load_timeline_data(data.get("data", {}))
+        elif resp_type == "EXPORT_EXCEL_RESPONSE":
+            self.handle_export_response(data)
+        elif resp_type == "ADD_TASK_RESPONSE":
+            if data.get("success"):
+                t_info = data.get("task", {})
+                t_name = t_info.get("name", "Task")
+                t_id = t_info.get("task_id", "")
+                self.toast.show_message(f"Task '{t_name}' ({t_id}) added successfully!")
+                self.reload_all_data()
+            else:
+                QMessageBox.critical(self, "Failed to Add Task", data.get("error", "An error occurred on the Central Server."))
+
+    # ------------------- TAB 1: USERS & HEADS TAB (A3, B5) -------------------
     def create_employee_tab(self) -> QWidget:
         widget = QWidget()
         layout = QHBoxLayout(widget)
 
-        # Left: Form
-        form_card = QFrame()
-        form_card.setObjectName("CardFrame")
-        f_layout = QVBoxLayout(form_card)
+        self.emp_splitter = QSplitter(Qt.Horizontal, widget)
 
-        f_layout.addWidget(QLabel("Add New User / Employee", objectName="SubTitle"))
+        # Form container
+        form_widget = QWidget()
+        f_layout = QVBoxLayout(form_widget)
+        f_layout.addWidget(QLabel("Add New Head (Team Employee)", objectName="SubTitle"))
 
         f_layout.addWidget(QLabel("User / Employee ID:", objectName="FieldLabel"))
         self.txt_emp_id = QLineEdit()
-        self.txt_emp_id.setPlaceholderText("e.g. 1002, coo2")
+        self.txt_emp_id.setPlaceholderText("e.g. 1002")
         f_layout.addWidget(self.txt_emp_id)
 
         f_layout.addWidget(QLabel("Full Name:", objectName="FieldLabel"))
         self.txt_emp_name = QLineEdit()
-        self.txt_emp_name.setPlaceholderText("e.g. Eng. Mohamed Ali")
+        self.txt_emp_name.setPlaceholderText("e.g. Eng. Karim Ashraf")
         f_layout.addWidget(self.txt_emp_name)
 
-        f_layout.addWidget(QLabel("Assign Role:", objectName="FieldLabel"))
-        self.cmb_emp_role = QComboBox()
-        self.cmb_emp_role.addItem("HEAD (Team Head / Employee)", ROLE_HEAD)
-        self.cmb_emp_role.addItem("COO (Chief Operating Officer)", ROLE_COO)
-        self.cmb_emp_role.addItem("ADMIN (System Administrator)", ROLE_ADMIN)
-        f_layout.addWidget(self.cmb_emp_role)
+        f_layout.addWidget(QLabel("Discipline (Required for Head):", objectName="FieldLabel"))
+        self.cmb_emp_disc = QComboBox()
+        f_layout.addWidget(self.cmb_emp_disc)
 
-        btn_add_emp = QPushButton("Create User Account")
+        btn_add_emp = QPushButton("Create Head Account")
         btn_add_emp.clicked.connect(self.on_add_employee)
         f_layout.addWidget(btn_add_emp)
         f_layout.addStretch()
 
-        # Right: List
-        list_card = QFrame()
-        list_card.setObjectName("CardFrame")
-        l_layout = QVBoxLayout(list_card)
-        l_layout.addWidget(QLabel("System Users & Employees", objectName="SubTitle"))
+        panel_left = CollapsiblePanel("New Head Creation", form_widget, horizontal=True)
+        self.emp_splitter.addWidget(panel_left)
 
-        self.tbl_employees = QTableWidget(0, 4)
-        self.tbl_employees.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Actions"])
-        self.tbl_employees.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tbl_employees.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.tbl_employees.verticalHeader().setDefaultSectionSize(40)
-        l_layout.addWidget(self.tbl_employees)
+        # Table container
+        table_widget = QWidget()
+        t_layout = QVBoxLayout(table_widget)
 
-        layout.addWidget(form_card, 1)
-        layout.addWidget(list_card, 2)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter by Discipline:", objectName="FieldLabel"))
+        self.cmb_filter_emp_disc = QComboBox()
+        self.cmb_filter_emp_disc.addItem("All Disciplines", None)
+        self.cmb_filter_emp_disc.currentIndexChanged.connect(self.update_users_views)
+        filter_row.addWidget(self.cmb_filter_emp_disc)
+        filter_row.addStretch()
+        t_layout.addLayout(filter_row)
+
+        self.tbl_employees = QTableWidget(0, 5)
+        self.tbl_employees.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Discipline", "Actions"])
+        setup_modern_table(self.tbl_employees, row_height=46)
+        self.tbl_employees.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl_employees.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_employees.setColumnWidth(0, 95)
+        self.tbl_employees.setColumnWidth(2, 90)
+        self.tbl_employees.setColumnWidth(3, 140)
+        self.tbl_employees.setColumnWidth(4, 180)
+        self.tbl_employees.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        t_layout.addWidget(self.tbl_employees)
+
+        panel_right = CollapsiblePanel("System Users & Heads List", table_widget, horizontal=True)
+        self.emp_splitter.addWidget(panel_right)
+        self.emp_splitter.setSizes([340, 660])
+
+        layout.addWidget(self.emp_splitter)
         return widget
+
+    def update_users_views(self):
+        selected_filter = self.cmb_filter_emp_disc.currentData()
+        self.tbl_employees.setRowCount(0)
+
+        # Filter users list
+        row_idx = 0
+        for u in self.users_data:
+            # Admin can only manage HEAD accounts in this view (B5)
+            if self.user["role"] == ROLE_ADMIN and u.get("role") != ROLE_HEAD:
+                continue
+
+            u_disc = u.get("discipline_id")
+            if selected_filter and u_disc != selected_filter:
+                continue
+
+            self.tbl_employees.insertRow(row_idx)
+            self.tbl_employees.setItem(row_idx, 0, create_table_item(u["user_id"], Qt.AlignCenter))
+            self.tbl_employees.setItem(row_idx, 1, create_table_item(u.get("full_name") or u["user_id"], Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl_employees.setItem(row_idx, 2, create_table_item(u.get("role", "HEAD"), Qt.AlignCenter))
+
+            # Discipline item - highlight if None (A3)
+            disc_display = u.get("discipline_name") or u.get("discipline_id")
+            disc_item = create_table_item(disc_display or "NO DISCIPLINE ASSIGNED", Qt.AlignLeft | Qt.AlignVCenter)
+            if not disc_display:
+                disc_item.setForeground(Qt.red)
+            self.tbl_employees.setItem(row_idx, 3, disc_item)
+
+            btn_edit = QPushButton("Edit")
+            btn_edit.clicked.connect(lambda _, uid=u["user_id"]: self.on_edit_employee(uid))
+            btn_rst = QPushButton("Reset Pass")
+            btn_rst.clicked.connect(lambda _, uid=u["user_id"]: self.on_reset_password(uid))
+
+            self.tbl_employees.setCellWidget(row_idx, 4, create_table_action_cell([btn_edit, btn_rst]))
+            row_idx += 1
 
     def on_add_employee(self):
         emp_id = self.txt_emp_id.text().strip()
         emp_name = self.txt_emp_name.text().strip()
-        role = self.cmb_emp_role.currentData()
+        disc_id = self.cmb_emp_disc.currentData()
 
         if not emp_id or not emp_name:
             QMessageBox.warning(self, "Error", "User ID and Full Name are required.")
             return
+        if not disc_id:
+            QMessageBox.warning(self, "Error", "Discipline is required for Head accounts.")
+            return
 
-        pwd_hash, pwd_salt = hash_password(emp_id) # Initial password = ID
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE user_id = ?", (emp_id,))
-            if cursor.fetchone():
-                QMessageBox.warning(self, "Error", f"User ID '{emp_id}' already exists.")
-                return
-
-            cursor.execute("""
-            INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
-            VALUES (?, ?, ?, ?, ?, 1)
-            """, (emp_id, emp_name, pwd_hash, pwd_salt, role))
-
-            # If assigning a HEAD, auto-assign to active projects
-            if role == ROLE_HEAD:
-                cursor.execute("SELECT project_id FROM projects WHERE is_hidden = 0")
-                for p in cursor.fetchall():
-                    cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)",
-                                   (emp_id, p["project_id"]))
-
-            conn.commit()
-
+        self.net_client.send_action("CREATE_USER", {
+            "user_id": emp_id,
+            "full_name": emp_name,
+            "role": ROLE_HEAD,
+            "discipline_id": disc_id
+        })
         self.txt_emp_id.clear()
         self.txt_emp_name.clear()
-        self.toast.show_message(f"User '{emp_name}' ({emp_id} - {role}) added successfully! Default password = '{emp_id}'.")
-        self.reload_all_data()
-        self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "USER_ADDED"})
+        self.toast.show_message(f"Head account creation request sent for '{emp_name}'.")
 
-    def on_reset_password(self, emp_id: str):
+    def on_edit_employee(self, user_id: str):
+        target = next((u for u in self.users_data if u["user_id"] == user_id), None)
+        if not target:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit Head - {user_id}")
+        dialog.setFixedSize(380, 240)
+        d_layout = QVBoxLayout(dialog)
+
+        d_layout.addWidget(QLabel("Full Name:", objectName="FieldLabel"))
+        txt_name = QLineEdit(dialog)
+        txt_name.setText(target.get("full_name") or "")
+        d_layout.addWidget(txt_name)
+
+        d_layout.addWidget(QLabel("Discipline:", objectName="FieldLabel"))
+        cmb_disc = QComboBox(dialog)
+        for d in self.disciplines_data:
+            if not d.get("is_hidden"):
+                cmb_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
+        idx = cmb_disc.findData(target.get("discipline_id"))
+        if idx >= 0:
+            cmb_disc.setCurrentIndex(idx)
+        d_layout.addWidget(cmb_disc)
+
+        btn_save = QPushButton("Save Changes", dialog)
+        btn_save.clicked.connect(lambda: dialog.accept())
+        d_layout.addWidget(btn_save)
+
+        if dialog.exec() == QDialog.Accepted:
+            new_name = txt_name.text().strip()
+            new_disc = cmb_disc.currentData()
+            self.net_client.send_action("UPDATE_USER", {
+                "user_id": user_id,
+                "full_name": new_name,
+                "discipline_id": new_disc
+            })
+            self.toast.show_message(f"Updated user '{user_id}'.")
+
+    def on_reset_password(self, user_id: str):
         confirm = QMessageBox.question(
-            self, "Reset Password", 
-            f"Reset password for User '{emp_id}' back to their User ID?",
+            self, "Confirm Password Reset",
+            f"Reset password for user '{user_id}' back to their User ID?",
             QMessageBox.Yes | QMessageBox.No
         )
         if confirm == QMessageBox.Yes:
-            pwd_hash, pwd_salt = hash_password(emp_id)
-            with self.db.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 1
-                WHERE user_id = ?
-                """, (pwd_hash, pwd_salt, emp_id))
-                conn.commit()
-            self.toast.show_message(f"Password for '{emp_id}' reset to '{emp_id}'.")
+            self.net_client.send_action("RESET_PASSWORD", {"user_id": user_id})
+            self.toast.show_message(f"Password reset request sent for user '{user_id}'.")
 
-    # ------------------- PROJECT TAB -------------------
+    # ------------------- TAB 2: PROJECTS MANAGEMENT -------------------
     def create_project_tab(self) -> QWidget:
         widget = QWidget()
         layout = QHBoxLayout(widget)
 
-        form_card = QFrame()
-        form_card.setObjectName("CardFrame")
-        f_layout = QVBoxLayout(form_card)
+        self.prj_splitter = QSplitter(Qt.Horizontal, widget)
 
+        # Form container
+        form_w = QWidget()
+        f_layout = QVBoxLayout(form_w)
         f_layout.addWidget(QLabel("Add New Project", objectName="SubTitle"))
 
-        f_layout.addWidget(QLabel("Project ID:", objectName="FieldLabel"))
+        f_layout.addWidget(QLabel("Project ID (e.g. PRJ-03):", objectName="FieldLabel"))
         self.txt_prj_id = QLineEdit()
-        self.txt_prj_id.setPlaceholderText("e.g. PRJ-03")
         f_layout.addWidget(self.txt_prj_id)
 
         f_layout.addWidget(QLabel("Project Name:", objectName="FieldLabel"))
@@ -202,282 +319,800 @@ class AdminWorkspace(QMainWindow):
         self.txt_prj_desc = QLineEdit()
         f_layout.addWidget(self.txt_prj_desc)
 
-        btn_add_prj = QPushButton("Add Project")
-        btn_add_prj.clicked.connect(self.on_add_project)
-        f_layout.addWidget(btn_add_prj)
+        btn_add = QPushButton("Add Project")
+        btn_add.clicked.connect(self.on_add_project)
+        f_layout.addWidget(btn_add)
         f_layout.addStretch()
 
-        list_card = QFrame()
-        list_card.setObjectName("CardFrame")
-        l_layout = QVBoxLayout(list_card)
-        l_layout.addWidget(QLabel("Projects List", objectName="SubTitle"))
+        panel_left = CollapsiblePanel("New Project", form_w, horizontal=True)
+        self.prj_splitter.addWidget(panel_left)
+
+        # Table container
+        tbl_w = QWidget()
+        t_layout = QVBoxLayout(tbl_w)
+        t_layout.addWidget(QLabel("Active & Archived Projects", objectName="SubTitle"))
 
         self.tbl_projects = QTableWidget(0, 4)
         self.tbl_projects.setHorizontalHeaderLabels(["ID", "Name", "Status", "Actions"])
-        self.tbl_projects.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tbl_projects.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.tbl_projects.verticalHeader().setDefaultSectionSize(40)
-        l_layout.addWidget(self.tbl_projects)
+        setup_modern_table(self.tbl_projects, row_height=46)
+        self.tbl_projects.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl_projects.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_projects.setColumnWidth(0, 95)
+        self.tbl_projects.setColumnWidth(2, 120)
+        self.tbl_projects.setColumnWidth(3, 110)
+        self.tbl_projects.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        t_layout.addWidget(self.tbl_projects)
 
-        layout.addWidget(form_card, 1)
-        layout.addWidget(list_card, 2)
+        panel_right = CollapsiblePanel("Projects Directory", tbl_w, horizontal=True)
+        self.prj_splitter.addWidget(panel_right)
+        self.prj_splitter.setSizes([340, 660])
+
+        layout.addWidget(self.prj_splitter)
         return widget
 
-    def on_add_project(self):
-        p_id = self.txt_prj_id.text().strip()
-        name = self.txt_prj_name.text().strip()
-        desc = self.txt_prj_desc.text().strip()
+    def update_projects_views(self):
+        self.tbl_projects.setRowCount(0)
+        self.cmb_task_prj.clear()
+        self.cmb_export_prj.clear()
+        self.cmb_export_prj.addItem("All Projects", None)
 
-        if not p_id or not name:
+        for r_idx, p in enumerate(self.projects_data):
+            self.tbl_projects.insertRow(r_idx)
+            self.tbl_projects.setItem(r_idx, 0, create_table_item(p["project_id"], Qt.AlignCenter))
+            self.tbl_projects.setItem(r_idx, 1, create_table_item(p["name"], Qt.AlignLeft | Qt.AlignVCenter))
+
+            st_str = "Hidden / Archived" if p.get("is_hidden") else "Active"
+            self.tbl_projects.setItem(r_idx, 2, create_table_item(st_str, Qt.AlignCenter))
+
+            btn_hide = QPushButton("Unhide" if p.get("is_hidden") else "Hide")
+            btn_hide.clicked.connect(lambda _, pid=p["project_id"], h=p.get("is_hidden", 0): self.on_toggle_hide_project(pid, h))
+            self.tbl_projects.setCellWidget(r_idx, 3, create_table_action_cell([btn_hide]))
+
+            if not p.get("is_hidden"):
+                self.cmb_task_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
+                if hasattr(self, "cmb_timeline_prj"):
+                    self.cmb_timeline_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
+            self.cmb_export_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
+
+    def on_add_project(self):
+        pid = self.txt_prj_id.text().strip()
+        pname = self.txt_prj_name.text().strip()
+        pdesc = self.txt_prj_desc.text().strip()
+        if not pid or not pname:
             QMessageBox.warning(self, "Error", "Project ID and Name are required.")
             return
-
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM projects WHERE project_id = ?", (p_id,))
-            if cursor.fetchone():
-                QMessageBox.warning(self, "Error", f"Project ID '{p_id}' already exists.")
-                return
-
-            cursor.execute("INSERT INTO projects (project_id, name, description) VALUES (?, ?, ?)",
-                           (p_id, name, desc))
-            
-            # Automatically assign all current HEAD employees to new project
-            cursor.execute("SELECT user_id FROM users WHERE role = ?", (ROLE_HEAD,))
-            heads = cursor.fetchall()
-            for h in heads:
-                cursor.execute("INSERT OR IGNORE INTO employee_projects (employee_id, project_id) VALUES (?, ?)",
-                               (h["user_id"], p_id))
-
-            conn.commit()
-
+        self.net_client.send_action("ADD_PROJECT", {"project_id": pid, "name": pname, "description": pdesc})
         self.txt_prj_id.clear()
         self.txt_prj_name.clear()
         self.txt_prj_desc.clear()
-        self.toast.show_message(f"Project '{name}' added successfully!")
-        self.reload_all_data()
-        self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "PROJECT_ADDED"})
+        self.toast.show_message(f"Project '{pname}' added.")
 
     def on_toggle_hide_project(self, project_id: str, current_hidden: int):
-        new_hidden = 0 if current_hidden else 1
-        action_name = "Hide" if new_hidden else "Unhide"
+        self.net_client.send_action("TOGGLE_HIDE_PROJECT", {"project_id": project_id, "current_hidden": current_hidden})
 
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE projects SET is_hidden = ? WHERE project_id = ?", (new_hidden, project_id))
-            conn.commit()
-
-        self.toast.show_message(f"Project '{project_id}' soft-deleted / {action_name.lower()}d.")
-        self.reload_all_data()
-        self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "PROJECT_VISIBILITY_CHANGED"})
-
-    # ------------------- TASK TAB -------------------
+    # ------------------- TAB 3: TASKS & DISCIPLINES TAB (A1, A2) -------------------
     def create_task_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
         self.task_subtabs = QTabWidget(widget)
-
-        # Sub-tab 1: Active Tasks & Direct Add
-        self.task_subtabs.addTab(self.create_active_tasks_subtab(), "Active Tasks & Direct Add")
-
-        # Sub-tab 2: Pending Approvals
+        self.task_subtabs.addTab(self.create_tasks_by_discipline_subtab(), "Tasks by Discipline")
         self.task_subtabs.addTab(self.create_pending_proposals_subtab(), "Pending Approvals")
-
-        # Sub-tab 3: Audit Sequence Timeline
-        self.task_subtabs.addTab(self.create_proposals_timeline_subtab(), "Audit Sequence Timeline")
+        self.task_subtabs.addTab(self.create_pending_date_changes_subtab(), "Date Change Requests")
+        self.task_subtabs.addTab(self.create_disciplines_management_subtab(), "Disciplines Management")
 
         layout.addWidget(self.task_subtabs)
         return widget
 
-    def create_active_tasks_subtab(self) -> QWidget:
+    def create_tasks_by_discipline_subtab(self) -> QWidget:
         widget = QWidget()
-        layout = QHBoxLayout(widget)
+        layout = QVBoxLayout(widget)
 
-        form_card = QFrame()
-        form_card.setObjectName("CardFrame")
-        f_layout = QVBoxLayout(form_card)
-
-        f_layout.addWidget(QLabel("Add New Task (Direct)", objectName="SubTitle"))
-
-        f_layout.addWidget(QLabel("Select Project:", objectName="FieldLabel"))
+        # Top Project Selector (A1)
+        top_prj_row = QHBoxLayout()
+        top_prj_row.addWidget(QLabel("Select Project:", objectName="FieldLabel"))
         self.cmb_task_prj = QComboBox()
-        self.cmb_task_prj.currentIndexChanged.connect(self.update_task_id_preview)
-        f_layout.addWidget(self.cmb_task_prj)
+        self.cmb_task_prj.currentIndexChanged.connect(self.update_tasks_views)
+        top_prj_row.addWidget(self.cmb_task_prj)
 
-        f_layout.addWidget(QLabel("Task ID (Auto-Generated):", objectName="FieldLabel"))
-        self.txt_task_id = QLineEdit()
-        self.txt_task_id.setPlaceholderText("Auto-generated ID (e.g. TSK-04)")
-        f_layout.addWidget(self.txt_task_id)
+        btn_new_task = QPushButton("+ Add New Task Directly")
+        btn_new_task.clicked.connect(self.on_open_create_task_dialog)
+        top_prj_row.addWidget(btn_new_task)
+        top_prj_row.addStretch()
+        layout.addLayout(top_prj_row)
 
-        f_layout.addWidget(QLabel("Task Name:", objectName="FieldLabel"))
-        self.txt_task_name = QLineEdit()
-        self.txt_task_name.setPlaceholderText("e.g. Server Core Upgrade")
-        f_layout.addWidget(self.txt_task_name)
+        # Tab bar with one tab per active discipline (A1)
+        self.tabs_disciplines = QTabWidget()
+        self.tabs_disciplines.currentChanged.connect(self.on_discipline_tab_changed)
+        layout.addWidget(self.tabs_disciplines)
 
-        btn_add_task = QPushButton("Add Task Directly")
-        btn_add_task.clicked.connect(self.on_add_task)
-        f_layout.addWidget(btn_add_task)
-        f_layout.addStretch()
-
-        list_card = QFrame()
-        list_card.setObjectName("CardFrame")
-        l_layout = QVBoxLayout(list_card)
-        l_layout.addWidget(QLabel("Active Project Tasks", objectName="SubTitle"))
-
-        self.tbl_tasks = QTableWidget(0, 6)
-        self.tbl_tasks.setHorizontalHeaderLabels(["ID", "Project", "Name", "Origin / Proposed By", "Status", "Actions"])
-        self.tbl_tasks.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tbl_tasks.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        self.tbl_tasks.verticalHeader().setDefaultSectionSize(40)
-        l_layout.addWidget(self.tbl_tasks)
-
-        layout.addWidget(form_card, 1)
-        layout.addWidget(list_card, 2)
         return widget
 
+    def on_open_create_task_dialog(self):
+        p_id = self.cmb_task_prj.currentData()
+        if not p_id:
+            QMessageBox.warning(self, "Error", "Please select a Project first.")
+            return
+
+        # Determine currently selected discipline tab so dialog opens with it pre-selected
+        curr_tab_idx = self.tabs_disciplines.currentIndex()
+        curr_tab_text = self.tabs_disciplines.tabText(curr_tab_idx) if curr_tab_idx >= 0 else ""
+        curr_disc_name = curr_tab_text.split(" (")[0].strip() if " (" in curr_tab_text else curr_tab_text.strip()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Create New Task & Assign to Head")
+        dlg.setMinimumSize(500, 460)
+        d_layout = QVBoxLayout(dlg)
+        d_layout.setContentsMargins(22, 20, 22, 20)
+        d_layout.setSpacing(12)
+
+        title = QLabel(f"Add New Task - {self.cmb_task_prj.currentText()}", dlg)
+        title.setObjectName("SubTitle")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #FFFFFF;")
+        d_layout.addWidget(title)
+
+        d_layout.addWidget(QLabel("Task Name (Required):", objectName="FieldLabel"))
+        txt_name = QLineEdit(dlg)
+        txt_name.setPlaceholderText("e.g. Electrical Main Distribution Board Wiring")
+        d_layout.addWidget(txt_name)
+
+        d_layout.addWidget(QLabel("Discipline (Required):", objectName="FieldLabel"))
+        cmb_disc = QComboBox(dlg)
+        sel_idx = 0
+        active_discs = [d for d in self.disciplines_data if not d.get("is_hidden")]
+        for idx, d in enumerate(active_discs):
+            cmb_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
+            if d["name"] == curr_disc_name or d["discipline_id"] == curr_disc_name:
+                sel_idx = idx
+        cmb_disc.setCurrentIndex(sel_idx)
+        d_layout.addWidget(cmb_disc)
+
+        d_layout.addWidget(QLabel("Assign to Specific Head (Optional):", objectName="FieldLabel"))
+        cmb_head = QComboBox(dlg)
+        d_layout.addWidget(cmb_head)
+
+        def update_head_options():
+            cmb_head.clear()
+            sel_disc = cmb_disc.currentData()
+            cmb_head.addItem("All Heads in Discipline (Default)", None)
+            heads = [
+                u for u in self.users_data 
+                if u.get("role") == ROLE_HEAD and u.get("discipline_id") == sel_disc
+            ]
+            for h in heads:
+                name_disp = h.get("full_name") or h["user_id"]
+                cmb_head.addItem(f"👤 {name_disp} ({h['user_id']})", h["user_id"])
+
+        cmb_disc.currentIndexChanged.connect(update_head_options)
+        update_head_options()
+
+        dates_row = QHBoxLayout()
+        b1 = QVBoxLayout()
+        b1.addWidget(QLabel("Planned Start Date:", objectName="FieldLabel"))
+        dt_start = QDateEdit(QDate.currentDate(), dlg)
+        dt_start.setCalendarPopup(True)
+        b1.addWidget(dt_start)
+        dates_row.addLayout(b1)
+
+        b2 = QVBoxLayout()
+        b2.addWidget(QLabel("Planned End Date:", objectName="FieldLabel"))
+        dt_end = QDateEdit(QDate.currentDate().addDays(7), dlg)
+        dt_end.setCalendarPopup(True)
+        b2.addWidget(dt_end)
+        dates_row.addLayout(b2)
+        d_layout.addLayout(dates_row)
+
+        btn_row = QHBoxLayout()
+        btn_cancel = QPushButton("Cancel", dlg)
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_add = QPushButton("Create & Assign Task", dlg)
+        btn_row.addWidget(btn_add)
+        d_layout.addLayout(btn_row)
+
+        # In-dialog validation: do NOT close dialog if invalid!
+        def on_create_click():
+            t_name = txt_name.text().strip()
+            disc_id = cmb_disc.currentData()
+            if not t_name:
+                QMessageBox.warning(dlg, "Validation Error", "Task Name is required.")
+                txt_name.setFocus()
+                return
+            if not disc_id:
+                QMessageBox.warning(dlg, "Validation Error", "Discipline is required.")
+                return
+            if dt_start.date() > dt_end.date():
+                QMessageBox.warning(dlg, "Validation Error", "Planned start date cannot be after end date.")
+                return
+            dlg.accept()
+
+        btn_add.clicked.connect(on_create_click)
+
+        if dlg.exec() == QDialog.Accepted:
+            t_name = txt_name.text().strip()
+            disc_id = cmb_disc.currentData()
+            head_id = cmb_head.currentData()
+
+            # Record target discipline so update_tasks_views automatically focuses on it
+            self._target_disc_after_add = disc_id
+            self._last_selected_disc = disc_id
+
+            self.net_client.send_action("ADD_TASK", {
+                "project_id": p_id,
+                "task_id": None,
+                "name": t_name,
+                "discipline_id": disc_id,
+                "assigned_head_id": head_id,
+                "planned_start_date": dt_start.date().toString("yyyy-MM-dd"),
+                "planned_end_date": dt_end.date().toString("yyyy-MM-dd")
+            })
+            self.toast.show_message(f"Creating task '{t_name}' under {disc_id}...")
+            # Proactively reload tasks
+            self.net_client.send_action("GET_TASKS", {"include_hidden": True})
+
+    def update_disciplines_views(self):
+        # Update user creation discipline combobox
+        self.cmb_emp_disc.clear()
+        self.cmb_filter_emp_disc.clear()
+        self.cmb_filter_emp_disc.addItem("All Disciplines", None)
+        self.cmb_export_disc.clear()
+        self.cmb_export_disc.addItem("All Disciplines", None)
+
+        for d in self.disciplines_data:
+            if not d.get("is_hidden"):
+                self.cmb_emp_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
+            self.cmb_filter_emp_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
+            self.cmb_export_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
+
+        self.update_disciplines_management_table()
+        self.update_tasks_views()
+
+    def update_tasks_views(self):
+        curr_p_id = self.cmb_task_prj.currentData()
+
+        # Remember currently selected tab before clearing
+        current_disc = getattr(self, "_target_disc_after_add", None)
+        if not current_disc:
+            current_disc = getattr(self, "_last_selected_disc", None)
+        if not current_disc:
+            curr_idx = self.tabs_disciplines.currentIndex()
+            if curr_idx >= 0:
+                t_title = self.tabs_disciplines.tabText(curr_idx)
+                current_disc = t_title.split(" (")[0].strip() if " (" in t_title else t_title.strip()
+
+        # Block signals during rebuild so currentIndexChanged doesn't reset active tab tracking
+        self.tabs_disciplines.blockSignals(True)
+        self.tabs_disciplines.clear()
+
+        # Build tabs for all active disciplines + "Unassigned" if any task has NULL discipline (A1)
+        active_discs = [d for d in self.disciplines_data if not d.get("is_hidden")]
+        target_tab_index = 0
+
+        for idx, d in enumerate(active_discs):
+            d_id = d["discipline_id"]
+            d_name = d["name"]
+
+            # Filter tasks for this project & discipline
+            matching_tasks = [
+                t for t in self.tasks_data 
+                if t.get("project_id") == curr_p_id and t.get("discipline_id") == d_id
+            ]
+
+            tbl = self.create_discipline_task_table(matching_tasks)
+            self.tabs_disciplines.addTab(tbl, f"{d_name} ({len(matching_tasks)})")
+
+            if current_disc and (current_disc == d_id or current_disc == d_name):
+                target_tab_index = idx
+
+        # Check unassigned tasks
+        unassigned_tasks = [
+            t for t in self.tasks_data
+            if t.get("project_id") == curr_p_id and not t.get("discipline_id")
+        ]
+        if unassigned_tasks:
+            tbl_un = self.create_discipline_task_table(unassigned_tasks)
+            self.tabs_disciplines.addTab(tbl_un, f"Unassigned ({len(unassigned_tasks)})")
+            if current_disc == "Unassigned":
+                target_tab_index = self.tabs_disciplines.count() - 1
+
+        if self.tabs_disciplines.count() > 0:
+            self.tabs_disciplines.setCurrentIndex(target_tab_index)
+        
+        self.tabs_disciplines.blockSignals(False)
+
+    def create_discipline_task_table(self, tasks_list: list) -> QTableWidget:
+        tbl = QTableWidget(0, 7)
+        tbl.setHorizontalHeaderLabels([
+            "Task ID", "Task Name", "Discipline", "Assigned Head", "Planned Dates", "Status", "Actions"
+        ])
+        setup_modern_table(tbl, row_height=46)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        tbl.setColumnWidth(0, 95)
+        tbl.setColumnWidth(2, 110)
+        tbl.setColumnWidth(3, 170)
+        tbl.setColumnWidth(4, 185)
+        tbl.setColumnWidth(5, 95)
+        tbl.setColumnWidth(6, 180)
+        tbl.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
+
+        for r_idx, t in enumerate(tasks_list):
+            tbl.insertRow(r_idx)
+            tbl.setItem(r_idx, 0, create_table_item(t["task_id"], Qt.AlignCenter))
+            tbl.setItem(r_idx, 1, create_table_item(t["name"], Qt.AlignLeft | Qt.AlignVCenter))
+            tbl.setItem(r_idx, 2, create_table_item(t.get("discipline_name") or t.get("discipline_id") or "Unassigned", Qt.AlignCenter))
+
+            head_display = t.get("assigned_head_name") or (f"ID: {t['assigned_head_id']}" if t.get("assigned_head_id") else "👥 All Heads (Discipline)")
+            tbl.setItem(r_idx, 3, create_table_item(head_display, Qt.AlignLeft | Qt.AlignVCenter))
+
+            p_dates = f"{t.get('planned_start_date') or 'TBD'} ➔ {t.get('planned_end_date') or 'TBD'}"
+            tbl.setItem(r_idx, 4, create_table_item(p_dates, Qt.AlignCenter))
+
+            tbl.setItem(r_idx, 5, create_table_item("Hidden" if t.get("is_hidden") else "Active", Qt.AlignCenter))
+
+            btn_edit = QPushButton("Edit Task")
+            btn_edit.clicked.connect(lambda _, task=t: self.on_admin_edit_task_details(task))
+
+            btn_hide = QPushButton("Unhide" if t.get("is_hidden") else "Hide")
+            btn_hide.clicked.connect(lambda _, tid=t["task_id"], h=t.get("is_hidden", 0): self.on_toggle_hide_task(tid, h))
+
+            tbl.setCellWidget(r_idx, 6, create_table_action_cell([btn_edit, btn_hide]))
+
+        return tbl
+
+    def on_admin_edit_task_details(self, task: dict):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit Task Details - {task['task_id']}")
+        dlg.setMinimumSize(480, 420)
+        d_layout = QVBoxLayout(dlg)
+        d_layout.setContentsMargins(20, 20, 20, 20)
+        d_layout.setSpacing(12)
+
+        title = QLabel(f"Edit Task: {task['name']} ({task['task_id']})", dlg)
+        title.setObjectName("SubTitle")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #FFFFFF;")
+        d_layout.addWidget(title)
+
+        d_layout.addWidget(QLabel("Task Name:", objectName="FieldLabel"))
+        txt_name = QLineEdit(dlg)
+        txt_name.setText(task.get("name") or "")
+        d_layout.addWidget(txt_name)
+
+        d_layout.addWidget(QLabel("Discipline:", objectName="FieldLabel"))
+        cmb_disc = QComboBox(dlg)
+        curr_disc = task.get("discipline_id")
+        disc_idx_to_select = 0
+        for idx, d in enumerate(self.disciplines_data):
+            if not d.get("is_hidden"):
+                cmb_disc.addItem(f"{d['name']} ({d['discipline_id']})", d["discipline_id"])
+                if d["discipline_id"] == curr_disc:
+                    disc_idx_to_select = cmb_disc.count() - 1
+        cmb_disc.setCurrentIndex(disc_idx_to_select)
+        d_layout.addWidget(cmb_disc)
+
+        d_layout.addWidget(QLabel("Assign to Head:", objectName="FieldLabel"))
+        cmb_head = QComboBox(dlg)
+        d_layout.addWidget(cmb_head)
+
+        def update_head_options():
+            cmb_head.clear()
+            sel_disc = cmb_disc.currentData()
+            cmb_head.addItem("All Heads in Discipline (Default)", None)
+            heads = [
+                u for u in self.users_data 
+                if u.get("role") == ROLE_HEAD and u.get("discipline_id") == sel_disc
+            ]
+            sel_head_idx = 0
+            for h in heads:
+                name_disp = h.get("full_name") or h["user_id"]
+                cmb_head.addItem(f"👤 {name_disp} ({h['user_id']})", h["user_id"])
+                if h["user_id"] == task.get("assigned_head_id"):
+                    sel_head_idx = cmb_head.count() - 1
+            cmb_head.setCurrentIndex(sel_head_idx)
+
+        cmb_disc.currentIndexChanged.connect(update_head_options)
+        update_head_options()
+
+        dates_row = QHBoxLayout()
+        b1 = QVBoxLayout()
+        b1.addWidget(QLabel("Planned Start Date:", objectName="FieldLabel"))
+        s_date_str = task.get("planned_start_date") or datetime.now().strftime("%Y-%m-%d")
+        dt_start = QDateEdit(QDate.fromString(s_date_str, "yyyy-MM-dd"), dlg)
+        dt_start.setCalendarPopup(True)
+        b1.addWidget(dt_start)
+        dates_row.addLayout(b1)
+
+        b2 = QVBoxLayout()
+        b2.addWidget(QLabel("Planned End Date:", objectName="FieldLabel"))
+        e_date_str = task.get("planned_end_date") or datetime.now().strftime("%Y-%m-%d")
+        dt_end = QDateEdit(QDate.fromString(e_date_str, "yyyy-MM-dd"), dlg)
+        dt_end.setCalendarPopup(True)
+        b2.addWidget(dt_end)
+        dates_row.addLayout(b2)
+        d_layout.addLayout(dates_row)
+
+        btn_row = QHBoxLayout()
+        btn_cancel = QPushButton("Cancel", dlg)
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_save = QPushButton("Save Changes", dlg)
+        btn_save.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_save)
+        d_layout.addLayout(btn_row)
+
+        if dlg.exec() == QDialog.Accepted:
+            new_name = txt_name.text().strip()
+            new_disc = cmb_disc.currentData()
+            new_head = cmb_head.currentData()
+            if not new_name or not new_disc:
+                QMessageBox.warning(self, "Error", "Task Name and Discipline cannot be empty.")
+                return
+
+            self.net_client.send_action("UPDATE_TASK", {
+                "task_id": task["task_id"],
+                "name": new_name,
+                "discipline_id": new_disc,
+                "assigned_head_id": new_head,
+                "planned_start_date": dt_start.date().toString("yyyy-MM-dd"),
+                "planned_end_date": dt_end.date().toString("yyyy-MM-dd")
+            })
+            self.toast.show_message(f"Task '{task['task_id']}' updated successfully.")
+
+    def on_admin_edit_task_dates(self, task_id: str, old_start: str, old_end: str):
+        self.on_admin_edit_task_details({"task_id": task_id, "planned_start_date": old_start, "planned_end_date": old_end})
+
+    # ------------------- TAB 4: PROJECT PROGRESSIVE TIMELINE -------------------
+    def create_timeline_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Top Project Selector Bar
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(QLabel("Select Project Timeline:", objectName="FieldLabel"))
+        self.cmb_timeline_prj = QComboBox()
+        self.cmb_timeline_prj.setMinimumWidth(280)
+        self.cmb_timeline_prj.currentIndexChanged.connect(self.on_timeline_project_selected)
+        top_bar.addWidget(self.cmb_timeline_prj)
+
+        btn_refresh_tl = QPushButton("Refresh Timeline")
+        btn_refresh_tl.clicked.connect(self.on_timeline_project_selected)
+        top_bar.addWidget(btn_refresh_tl)
+        top_bar.addStretch()
+
+        layout.addLayout(top_bar)
+
+        # Progressive Timeline Component
+        self.timeline_widget = ProjectProgressiveTimelineWidget()
+        layout.addWidget(self.timeline_widget, 1)
+
+        return widget
+
+    def on_timeline_project_selected(self):
+        if not hasattr(self, "cmb_timeline_prj"):
+            return
+        p_id = self.cmb_timeline_prj.currentData()
+        if p_id:
+            self.net_client.send_action("GET_PROJECT_TIMELINE", {"project_id": p_id})
+        elif hasattr(self, "timeline_widget"):
+            self.timeline_widget.load_timeline_data({})
+
+    def on_toggle_hide_task(self, task_id: str, current_hidden: int):
+        self.net_client.send_action("TOGGLE_HIDE_TASK", {"task_id": task_id, "current_hidden": current_hidden})
+
+    def on_discipline_tab_changed(self, idx: int):
+        if idx >= 0 and hasattr(self, "tabs_disciplines"):
+            t_title = self.tabs_disciplines.tabText(idx)
+            self._last_selected_disc = t_title.split(" (")[0].strip() if " (" in t_title else t_title.strip()
+
+    # ------------------- SUBTAB: PENDING TASK PROPOSALS (A1) -------------------
     def create_pending_proposals_subtab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        header_row = QHBoxLayout()
-        header_row.addWidget(QLabel("Pending Task Approvals (Head Requests)", objectName="SubTitle"))
-        header_row.addStretch()
-
-        btn_refresh = QPushButton("Refresh Requests")
-        btn_refresh.clicked.connect(self.reload_all_data)
-        header_row.addWidget(btn_refresh)
-        layout.addLayout(header_row)
-
         self.tbl_pending_proposals = QTableWidget(0, 7)
         self.tbl_pending_proposals.setHorizontalHeaderLabels([
-            "Request ID", "Task ID", "Project", "Proposed Task Name", "Proposed By", "Submitted At", "Actions"
+            "Request ID", "Task Name", "Discipline", "Proposed Schedule", "Proposed By", "Project", "Actions"
         ])
-        self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        self.tbl_pending_proposals.verticalHeader().setDefaultSectionSize(44)
+        setup_modern_table(self.tbl_pending_proposals, row_height=46)
+        self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_pending_proposals.setColumnWidth(0, 95)
+        self.tbl_pending_proposals.setColumnWidth(2, 110)
+        self.tbl_pending_proposals.setColumnWidth(3, 185)
+        self.tbl_pending_proposals.setColumnWidth(4, 140)
+        self.tbl_pending_proposals.setColumnWidth(5, 140)
+        self.tbl_pending_proposals.setColumnWidth(6, 180)
+        self.tbl_pending_proposals.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
         layout.addWidget(self.tbl_pending_proposals)
         return widget
 
-    def create_proposals_timeline_subtab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+    def update_proposals_views(self, proposals: list):
+        pending = [p for p in proposals if p.get("status") == "PENDING"]
+        self.task_subtabs.setTabText(1, f"Pending Approvals ({len(pending)})")
+        self.tbl_pending_proposals.setRowCount(0)
 
-        header_row = QHBoxLayout()
-        header_row.addWidget(QLabel("Audit Sequence Timeline - Task Requests & Decisions", objectName="SubTitle"))
-        header_row.addStretch()
+        for r_idx, p in enumerate(pending):
+            self.tbl_pending_proposals.insertRow(r_idx)
+            self.tbl_pending_proposals.setItem(r_idx, 0, create_table_item(p["proposal_id"], Qt.AlignCenter))
+            self.tbl_pending_proposals.setItem(r_idx, 1, create_table_item(p["task_name"], Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl_pending_proposals.setItem(r_idx, 2, create_table_item(p.get("discipline_name") or p.get("discipline_id") or "General", Qt.AlignCenter))
+            p_sched = f"{p.get('planned_start_date') or 'TBD'} ➔ {p.get('planned_end_date') or 'TBD'}"
+            self.tbl_pending_proposals.setItem(r_idx, 3, create_table_item(p_sched, Qt.AlignCenter))
+            self.tbl_pending_proposals.setItem(r_idx, 4, create_table_item(p.get("proposer_name") or p["proposed_by_id"], Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl_pending_proposals.setItem(r_idx, 5, create_table_item(p.get("project_name") or p["project_id"], Qt.AlignLeft | Qt.AlignVCenter))
 
-        btn_refresh = QPushButton("Refresh Timeline")
-        btn_refresh.clicked.connect(self.reload_all_data)
-        header_row.addWidget(btn_refresh)
-        layout.addLayout(header_row)
+            btn_app = QPushButton("Approve")
+            btn_app.setObjectName("SuccessButton")
+            btn_app.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_approve_proposal(pid))
 
-        self.tbl_proposals_timeline = QTableWidget(0, 8)
-        self.tbl_proposals_timeline.setHorizontalHeaderLabels([
-            "Request ID", "Task ID", "Project", "Task Name", "Proposed By", "Submitted At", "Status", "Decision & Feedback"
-        ])
-        self.tbl_proposals_timeline.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tbl_proposals_timeline.verticalHeader().setDefaultSectionSize(38)
-        layout.addWidget(self.tbl_proposals_timeline)
-        return widget
+            btn_rej = QPushButton("Reject")
+            btn_rej.setObjectName("DangerButton")
+            btn_rej.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_reject_proposal(pid))
 
-    def update_task_id_preview(self):
-        p_id = self.cmb_task_prj.currentData()
-        if p_id:
-            next_id = self.db.generate_next_task_id(p_id)
-            self.txt_task_id.setText(next_id)
-
-    def on_add_task(self):
-        p_id = self.cmb_task_prj.currentData()
-        t_id = self.txt_task_id.text().strip()
-        t_name = self.txt_task_name.text().strip()
-
-        if not p_id or not t_id or not t_name:
-            QMessageBox.warning(self, "Error", "Project, Task ID, and Task Name are required.")
-            return
-
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (t_id,))
-            if cursor.fetchone():
-                QMessageBox.warning(self, "Error", f"Task ID '{t_id}' already exists.")
-                return
-
-            cursor.execute("INSERT INTO tasks (task_id, project_id, name) VALUES (?, ?, ?)",
-                           (t_id, p_id, t_name))
-            conn.commit()
-
-        self.txt_task_name.clear()
-        self.update_task_id_preview()
-        self.toast.show_message(f"Task '{t_name}' added successfully!")
-        self.reload_all_data()
-        self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "TASK_ADDED"})
-
-    def on_toggle_hide_task(self, task_id: str, current_hidden: int):
-        new_hidden = 0 if current_hidden else 1
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE tasks SET is_hidden = ? WHERE task_id = ?", (new_hidden, task_id))
-            conn.commit()
-
-        self.toast.show_message(f"Task '{task_id}' visibility toggled.")
-        self.reload_all_data()
-        self.net_client.send_action("DATA_UPDATE_EVENT", {"reason": "TASK_VISIBILITY_CHANGED"})
+            self.tbl_pending_proposals.setCellWidget(r_idx, 6, create_table_action_cell([btn_app, btn_rej]))
 
     def on_approve_proposal(self, proposal_id: str):
-        confirm = QMessageBox.question(
-            self, "Confirm Approval", 
-            f"Approve task proposal '{proposal_id}' and add task to project?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if confirm == QMessageBox.Yes:
-            try:
-                self.net_client.send_action("APPROVE_TASK_PROPOSAL", {
-                    "proposal_id": proposal_id,
-                    "admin_id": self.user["user_id"]
-                })
-                self.toast.show_message(f"Task proposal '{proposal_id}' approved successfully!")
-                self.reload_all_data()
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to approve proposal: {e}")
+        self.net_client.send_action("APPROVE_TASK_PROPOSAL", {
+            "proposal_id": proposal_id,
+            "admin_id": self.user["user_id"]
+        })
+        self.toast.show_message("Proposal approved.")
 
     def on_reject_proposal(self, proposal_id: str):
-        reason, ok = QInputDialog.getText(
-            self, "Reject Task Proposal", 
-            "Please enter the reason for rejection (mandatory):"
-        )
-        if not ok:
-            return
-        reason = reason.strip()
-        if not reason:
-            QMessageBox.warning(self, "Validation Error", "Rejection reason cannot be empty.")
-            return
-
-        try:
+        reason, ok = QInputDialog.getText(self, "Reject Task Proposal", "Enter mandatory rejection reason:")
+        if ok and reason.strip():
             self.net_client.send_action("REJECT_TASK_PROPOSAL", {
                 "proposal_id": proposal_id,
                 "admin_id": self.user["user_id"],
-                "reason": reason
+                "reason": reason.strip()
             })
-            self.toast.show_message(f"Task proposal '{proposal_id}' rejected.")
-            self.reload_all_data()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to reject proposal: {e}")
+            self.toast.show_message("Proposal rejected.")
+        elif ok:
+            QMessageBox.warning(self, "Error", "A rejection reason is mandatory.")
 
-    def on_task_proposal_event(self, data: dict):
-        prop = data.get("proposal", {})
-        msg_type = data.get("type")
-        if msg_type == "NEW_TASK_PROPOSAL_EVENT":
-            p_by = prop.get("proposed_by_id", "A Head employee")
-            t_name = prop.get("task_name", "")
-            self.toast.show_message(f"New task proposal from {p_by}: '{t_name}'")
-        elif msg_type == "TASK_PROPOSAL_DECIDED_EVENT":
-            status = prop.get("status")
-            t_name = prop.get("task_name")
-            self.toast.show_message(f"Task proposal '{t_name}' was {status.lower()}.")
-        self.reload_all_data()
+    # ------------------- SUBTAB: DATE CHANGE REQUESTS (A2) -------------------
+    def create_pending_date_changes_subtab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
 
-    # ------------------- EXPORT TAB -------------------
+        self.tbl_pending_date_changes = QTableWidget(0, 7)
+        self.tbl_pending_date_changes.setHorizontalHeaderLabels([
+            "Request ID", "Task Name", "Current Schedule", "Requested Schedule", "Reason", "Requested By", "Actions"
+        ])
+        setup_modern_table(self.tbl_pending_date_changes, row_height=46)
+        self.tbl_pending_date_changes.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl_pending_date_changes.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_pending_date_changes.setColumnWidth(0, 95)
+        self.tbl_pending_date_changes.setColumnWidth(2, 175)
+        self.tbl_pending_date_changes.setColumnWidth(3, 175)
+        self.tbl_pending_date_changes.setColumnWidth(4, 150)
+        self.tbl_pending_date_changes.setColumnWidth(5, 130)
+        self.tbl_pending_date_changes.setColumnWidth(6, 180)
+        self.tbl_pending_date_changes.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
+        layout.addWidget(self.tbl_pending_date_changes)
+        return widget
+
+    def update_date_change_views(self, requests: list):
+        pending = [r for r in requests if r.get("status") == "PENDING"]
+        self.task_subtabs.setTabText(2, f"Date Change Requests ({len(pending)})")
+        self.tbl_pending_date_changes.setRowCount(0)
+
+        for r_idx, req in enumerate(pending):
+            self.tbl_pending_date_changes.insertRow(r_idx)
+            self.tbl_pending_date_changes.setItem(r_idx, 0, create_table_item(req["request_id"], Qt.AlignCenter))
+            self.tbl_pending_date_changes.setItem(r_idx, 1, create_table_item(f"{req.get('task_name')} ({req['task_id']})", Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl_pending_date_changes.setItem(r_idx, 2, create_table_item(f"{req.get('old_start_date')} ➔ {req.get('old_end_date')}", Qt.AlignCenter))
+            self.tbl_pending_date_changes.setItem(r_idx, 3, create_table_item(f"{req['new_start_date']} ➔ {req['new_end_date']}", Qt.AlignCenter))
+            self.tbl_pending_date_changes.setItem(r_idx, 4, create_table_item(req["reason"], Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl_pending_date_changes.setItem(r_idx, 5, create_table_item(req.get("requester_name") or req["requested_by_id"], Qt.AlignLeft | Qt.AlignVCenter))
+
+            btn_app = QPushButton("Approve")
+            btn_app.setObjectName("SuccessButton")
+            btn_app.clicked.connect(lambda _, rid=req["request_id"]: self.on_approve_date_change(rid))
+
+            btn_rej = QPushButton("Reject")
+            btn_rej.setObjectName("DangerButton")
+            btn_rej.clicked.connect(lambda _, rid=req["request_id"]: self.on_reject_date_change(rid))
+
+            self.tbl_pending_date_changes.setCellWidget(r_idx, 6, create_table_action_cell([btn_app, btn_rej]))
+
+    def on_approve_date_change(self, request_id: str):
+        self.net_client.send_action("APPROVE_DATE_CHANGE", {
+            "request_id": request_id,
+            "admin_id": self.user["user_id"]
+        })
+        self.toast.show_message("Date change approved and task schedule updated.")
+
+    def on_reject_date_change(self, request_id: str):
+        reason, ok = QInputDialog.getText(self, "Reject Date Change", "Enter mandatory rejection reason:")
+        if ok and reason.strip():
+            self.net_client.send_action("REJECT_DATE_CHANGE", {
+                "request_id": request_id,
+                "admin_id": self.user["user_id"],
+                "reason": reason.strip()
+            })
+            self.toast.show_message("Date change request rejected.")
+        elif ok:
+            QMessageBox.warning(self, "Error", "A rejection reason is mandatory.")
+
+    # ------------------- SUBTAB: DISCIPLINES MANAGEMENT (A1) -------------------
+    def create_disciplines_management_subtab(self) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+
+        form_w = QWidget()
+        f_layout = QVBoxLayout(form_w)
+        f_layout.addWidget(QLabel("Add New Discipline", objectName="SubTitle"))
+
+        f_layout.addWidget(QLabel("Discipline ID / Code (e.g. ELE):", objectName="FieldLabel"))
+        self.txt_disc_id = QLineEdit()
+        f_layout.addWidget(self.txt_disc_id)
+
+        f_layout.addWidget(QLabel("Discipline Name:", objectName="FieldLabel"))
+        self.txt_disc_name = QLineEdit()
+        f_layout.addWidget(self.txt_disc_name)
+
+        btn_add = QPushButton("Add Discipline")
+        btn_add.clicked.connect(self.on_add_discipline)
+        f_layout.addWidget(btn_add)
+        f_layout.addStretch()
+
+        p_left = CollapsiblePanel("Add Discipline", form_w, horizontal=True)
+
+        tbl_w = QWidget()
+        t_layout = QVBoxLayout(tbl_w)
+        t_layout.addWidget(QLabel("System Disciplines Directory", objectName="SubTitle"))
+
+        self.tbl_disciplines = QTableWidget(0, 4)
+        self.tbl_disciplines.setHorizontalHeaderLabels(["ID", "Name", "Status", "Actions"])
+        setup_modern_table(self.tbl_disciplines, row_height=46)
+        self.tbl_disciplines.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl_disciplines.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_disciplines.setColumnWidth(0, 95)
+        self.tbl_disciplines.setColumnWidth(2, 110)
+        self.tbl_disciplines.setColumnWidth(3, 110)
+        self.tbl_disciplines.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        t_layout.addWidget(self.tbl_disciplines)
+
+        p_right = CollapsiblePanel("Disciplines Directory", tbl_w, horizontal=True)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(p_left)
+        splitter.addWidget(p_right)
+        splitter.setSizes([340, 660])
+        layout.addWidget(splitter)
+        return widget
+
+    def update_disciplines_management_table(self):
+        self.tbl_disciplines.setRowCount(0)
+        for r_idx, d in enumerate(self.disciplines_data):
+            self.tbl_disciplines.insertRow(r_idx)
+            self.tbl_disciplines.setItem(r_idx, 0, create_table_item(d["discipline_id"], Qt.AlignCenter))
+            self.tbl_disciplines.setItem(r_idx, 1, create_table_item(d["name"], Qt.AlignLeft | Qt.AlignVCenter))
+
+            st = "Hidden" if d.get("is_hidden") else "Active"
+            self.tbl_disciplines.setItem(r_idx, 2, create_table_item(st, Qt.AlignCenter))
+
+            btn_hide = QPushButton("Unhide" if d.get("is_hidden") else "Hide")
+            btn_hide.clicked.connect(lambda _, did=d["discipline_id"], h=d.get("is_hidden", 0): self.on_toggle_hide_discipline(did, h))
+            self.tbl_disciplines.setCellWidget(r_idx, 3, create_table_action_cell([btn_hide]))
+
+    def on_add_discipline(self):
+        did = self.txt_disc_id.text().strip().upper()
+        dname = self.txt_disc_name.text().strip()
+        if not did or not dname:
+            QMessageBox.warning(self, "Error", "Discipline ID and Name are required.")
+            return
+        self.net_client.send_action("ADD_DISCIPLINE", {"discipline_id": did, "name": dname})
+        self.txt_disc_id.clear()
+        self.txt_disc_name.clear()
+        self.toast.show_message(f"Discipline '{dname}' added.")
+
+    def on_toggle_hide_discipline(self, disc_id: str, current_hidden: int):
+        self.net_client.send_action("TOGGLE_HIDE_DISCIPLINE", {"discipline_id": disc_id, "current_hidden": current_hidden})
+
+    # ------------------- TAB 4: ANALYSIS TAB -------------------
+    def create_analysis_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        metrics_row = QHBoxLayout()
+        metrics_row.setSpacing(12)
+
+        self.kpi_logs = KpiMetricCard("Total Logs", "0", "📋", "#8B5CF6", "Recorded by team")
+        self.kpi_revs = KpiMetricCard("Total Revisions", "0", "🔄", "#F59E0B", "Rework iterations")
+        self.kpi_prjs = KpiMetricCard("Active Projects", "0", "📁", "#10B981", "Currently active")
+        self.kpi_emps = KpiMetricCard("Active Heads", "0", "👥", "#3B82F6", "Supervising disciplines")
+
+        metrics_row.addWidget(self.kpi_logs)
+        metrics_row.addWidget(self.kpi_revs)
+        metrics_row.addWidget(self.kpi_prjs)
+        metrics_row.addWidget(self.kpi_emps)
+        layout.addLayout(metrics_row)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Left: Employee breakdown
+        c_emp = QFrame(splitter)
+        c_emp.setObjectName("CardFrame")
+        ce_l = QVBoxLayout(c_emp)
+        ce_l.setContentsMargins(10, 10, 10, 10)
+        ce_l.addWidget(QLabel("Employee Rework & Revisions", objectName="SubTitle"))
+        self.tbl_emp_analysis = QTableWidget(0, 6)
+        self.tbl_emp_analysis.setHorizontalHeaderLabels([
+            "User ID", "Full Name", "Discipline", "Logs", "New", "Revisions"
+        ])
+        setup_modern_table(self.tbl_emp_analysis, row_height=42, min_col_width=75)
+        self.tbl_emp_analysis.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl_emp_analysis.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_emp_analysis.setColumnWidth(0, 85)
+        self.tbl_emp_analysis.setColumnWidth(2, 115)
+        self.tbl_emp_analysis.setColumnWidth(3, 70)
+        self.tbl_emp_analysis.setColumnWidth(4, 70)
+        self.tbl_emp_analysis.setColumnWidth(5, 80)
+        ce_l.addWidget(self.tbl_emp_analysis)
+        splitter.addWidget(c_emp)
+
+        # Right: Project breakdown
+        c_prj = QFrame(splitter)
+        c_prj.setObjectName("CardFrame")
+        cp_l = QVBoxLayout(c_prj)
+        cp_l.setContentsMargins(10, 10, 10, 10)
+        cp_l.addWidget(QLabel("Project Progress Breakdown", objectName="SubTitle"))
+        self.tbl_prj_analysis = QTableWidget(0, 6)
+        self.tbl_prj_analysis.setHorizontalHeaderLabels([
+            "Project ID", "Project Name", "Tasks", "Done", "In Progress", "Revisions"
+        ])
+        setup_modern_table(self.tbl_prj_analysis, row_height=42, min_col_width=75)
+        self.tbl_prj_analysis.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tbl_prj_analysis.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_prj_analysis.setColumnWidth(0, 90)
+        self.tbl_prj_analysis.setColumnWidth(2, 65)
+        self.tbl_prj_analysis.setColumnWidth(3, 65)
+        self.tbl_prj_analysis.setColumnWidth(4, 90)
+        self.tbl_prj_analysis.setColumnWidth(5, 80)
+        cp_l.addWidget(self.tbl_prj_analysis)
+        splitter.addWidget(c_prj)
+
+        splitter.setSizes([500, 500])
+        layout.addWidget(splitter, 1)
+        return widget
+
+    def update_analytics_views(self, data: dict):
+        self.kpi_logs.set_value(data.get("total_logs", 0))
+        self.kpi_revs.set_value(data.get("total_revisions", 0))
+        self.kpi_prjs.set_value(data.get("active_projects", 0))
+        self.kpi_emps.set_value(data.get("active_employees", 0))
+
+        # Employee breakdown
+        self.tbl_emp_analysis.setRowCount(0)
+        for r_idx, s in enumerate(data.get("employee_breakdown", [])):
+            self.tbl_emp_analysis.insertRow(r_idx)
+            self.tbl_emp_analysis.setItem(r_idx, 0, create_table_item(s["user_id"], Qt.AlignCenter))
+            self.tbl_emp_analysis.setItem(r_idx, 1, create_table_item(s.get("full_name") or s["user_id"], Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl_emp_analysis.setItem(r_idx, 2, create_table_item(s.get("discipline_name") or s.get("discipline_id") or "Unassigned", Qt.AlignCenter))
+            self.tbl_emp_analysis.setItem(r_idx, 3, create_table_item(str(s["total_logs"]), Qt.AlignCenter))
+            self.tbl_emp_analysis.setItem(r_idx, 4, create_table_item(str(s["new_logs"]), Qt.AlignCenter))
+            self.tbl_emp_analysis.setItem(r_idx, 5, create_table_item(str(s["rev_logs"]), Qt.AlignCenter))
+
+        # Project breakdown
+        self.tbl_prj_analysis.setRowCount(0)
+        for r_idx, p in enumerate(data.get("project_breakdown", [])):
+            self.tbl_prj_analysis.insertRow(r_idx)
+            self.tbl_prj_analysis.setItem(r_idx, 0, create_table_item(p["project_id"], Qt.AlignCenter))
+            self.tbl_prj_analysis.setItem(r_idx, 1, create_table_item(p["project_name"], Qt.AlignLeft | Qt.AlignVCenter))
+            self.tbl_prj_analysis.setItem(r_idx, 2, create_table_item(str(p["total_tasks"]), Qt.AlignCenter))
+            self.tbl_prj_analysis.setItem(r_idx, 3, create_table_item(str(p["done_count"]), Qt.AlignCenter))
+            self.tbl_prj_analysis.setItem(r_idx, 4, create_table_item(str(p["in_prog_count"]), Qt.AlignCenter))
+            self.tbl_prj_analysis.setItem(r_idx, 5, create_table_item(str(p["total_revisions"]), Qt.AlignCenter))
+
+    # ------------------- TAB 5: EXCEL EXPORT (A4, B2) -------------------
     def create_export_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -485,367 +1120,86 @@ class AdminWorkspace(QMainWindow):
         card = QFrame()
         card.setObjectName("CardFrame")
         c_layout = QVBoxLayout(card)
+        c_layout.addWidget(QLabel("Export Progress Logs with Discipline Categorization (A4)", objectName="SubTitle"))
 
-        c_layout.addWidget(QLabel("Export Progress Logs to Excel", objectName="SubTitle"))
+        filters_grid = QHBoxLayout()
 
-        c_layout.addWidget(QLabel("Filter by Project (Optional):", objectName="FieldLabel"))
+        b_p = QVBoxLayout()
+        b_p.addWidget(QLabel("Project Filter:", objectName="FieldLabel"))
         self.cmb_export_prj = QComboBox()
-        c_layout.addWidget(self.cmb_export_prj)
+        b_p.addWidget(self.cmb_export_prj)
+        filters_grid.addLayout(b_p)
 
-        c_layout.addSpacing(12)
+        b_d = QVBoxLayout()
+        b_d.addWidget(QLabel("Discipline Filter:", objectName="FieldLabel"))
+        self.cmb_export_disc = QComboBox()
+        self.cmb_export_disc.currentIndexChanged.connect(self.update_export_heads_filter)
+        b_d.addWidget(self.cmb_export_disc)
+        filters_grid.addLayout(b_d)
 
-        btn_export_all = QPushButton("Export All Logs to Excel")
-        btn_export_all.clicked.connect(lambda: self.on_export_excel(filter_project=False))
-        c_layout.addWidget(btn_export_all)
+        b_h = QVBoxLayout()
+        b_h.addWidget(QLabel("Head Employee Filter:", objectName="FieldLabel"))
+        self.cmb_export_head = QComboBox()
+        self.cmb_export_head.addItem("All Heads", None)
+        b_h.addWidget(self.cmb_export_head)
+        filters_grid.addLayout(b_h)
 
-        btn_export_single = QPushButton("Export Filtered Project Logs to Excel")
-        btn_export_single.clicked.connect(lambda: self.on_export_excel(filter_project=True))
-        c_layout.addWidget(btn_export_single)
+        c_layout.addLayout(filters_grid)
+
+        btn_export = QPushButton("Export Categorized Excel Report")
+        btn_export.setMinimumHeight(44)
+        btn_export.clicked.connect(self.on_request_excel_export)
+        c_layout.addWidget(btn_export)
 
         c_layout.addStretch()
         layout.addWidget(card)
         return widget
 
-    def on_export_excel(self, filter_project: bool):
-        project_id = self.cmb_export_prj.currentData() if filter_project else None
-        
-        default_filename = f"Progress_Logs_{project_id or 'ALL'}.xlsx"
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Excel Report", default_filename, "Excel Files (*.xlsx)"
-        )
-        if not file_path:
+    def update_export_heads_filter(self):
+        selected_disc = self.cmb_export_disc.currentData()
+        self.cmb_export_head.clear()
+        self.cmb_export_head.addItem("All Heads", None)
+        for u in self.users_data:
+            if u.get("role") == ROLE_HEAD:
+                if not selected_disc or u.get("discipline_id") == selected_disc:
+                    self.cmb_export_head.addItem(f"{u.get('full_name') or u['user_id']} ({u['user_id']})", u["user_id"])
+
+    def on_request_excel_export(self):
+        p_id = self.cmb_export_prj.currentData()
+        d_id = self.cmb_export_disc.currentData()
+        h_id = self.cmb_export_head.currentData()
+
+        self.net_client.send_action("EXPORT_EXCEL_REQUEST", {
+            "project_id": p_id,
+            "discipline_id": d_id,
+            "employee_id": h_id
+        })
+        self.toast.show_message("Export request sent to Central Server...")
+
+    def handle_export_response(self, data: dict):
+        if not data.get("success"):
+            QMessageBox.critical(self, "Export Error", data.get("error", "Server export failed."))
             return
 
-        try:
-            saved_path = self.excel_service.export_logs_to_excel(file_path, project_id=project_id)
-            QMessageBox.information(self, "Export Success", f"Excel report saved to:\n{saved_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Failed", f"Error exporting Excel file:\n{e}")
+        b64 = data.get("data_b64")
+        if not b64:
+            return
 
-    # ------------------- RELOAD DATA -------------------
-    def reload_all_data(self):
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
+        raw_bytes = base64.b64decode(b64)
+        default_name = data.get("filename") or "Progress_Logs_Report.xlsx"
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Excel Report", default_name, "Excel Files (*.xlsx)")
+        if file_path:
+            with open(file_path, "wb") as f:
+                f.write(raw_bytes)
+            QMessageBox.information(self, "Success", f"Excel report saved successfully to:\n{file_path}")
 
-            # Users & Employees (all non-superadmin)
-            cursor.execute("SELECT * FROM users WHERE user_id != 'superadmin' ORDER BY created_at ASC")
-            employees = cursor.fetchall()
-            self.tbl_employees.setRowCount(0)
-            for r_idx, emp in enumerate(employees):
-                self.tbl_employees.insertRow(r_idx)
-                self.tbl_employees.setItem(r_idx, 0, QTableWidgetItem(emp["user_id"]))
-                self.tbl_employees.setItem(r_idx, 1, QTableWidgetItem(emp["full_name"] or emp["user_id"]))
-                self.tbl_employees.setItem(r_idx, 2, QTableWidgetItem(emp["role"]))
+    def on_task_proposal_event(self, data: dict):
+        self.toast.show_message("Task Proposal Event received.")
+        self.reload_all_data()
 
-                btn_rst = QPushButton("Reset Pass")
-                btn_rst.setMinimumWidth(85)
-                btn_rst.clicked.connect(lambda _, eid=emp["user_id"]: self.on_reset_password(eid))
-                self.tbl_employees.setCellWidget(r_idx, 3, btn_rst)
-
-            # Projects
-            cursor.execute("SELECT * FROM projects")
-            projects = cursor.fetchall()
-            self.tbl_projects.setRowCount(0)
-            self.cmb_task_prj.clear()
-            self.cmb_export_prj.clear()
-            self.cmb_export_prj.addItem("All Projects", None)
-
-            for r_idx, p in enumerate(projects):
-                self.tbl_projects.insertRow(r_idx)
-                self.tbl_projects.setItem(r_idx, 0, QTableWidgetItem(p["project_id"]))
-                self.tbl_projects.setItem(r_idx, 1, QTableWidgetItem(p["name"]))
-                
-                status_str = "Hidden / Soft-Deleted" if p["is_hidden"] else "Active"
-                self.tbl_projects.setItem(r_idx, 2, QTableWidgetItem(status_str))
-
-                btn_hide = QPushButton("Unhide" if p["is_hidden"] else "Hide / Delete")
-                btn_hide.setMinimumWidth(95)
-                if not p["is_hidden"]:
-                    btn_hide.setObjectName("DangerButton")
-                btn_hide.clicked.connect(lambda _, pid=p["project_id"], h=p["is_hidden"]: self.on_toggle_hide_project(pid, h))
-                self.tbl_projects.setCellWidget(r_idx, 3, btn_hide)
-
-                if not p["is_hidden"]:
-                    self.cmb_task_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
-                self.cmb_export_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
-
-            # Tasks
-            cursor.execute("""
-            SELECT t.*, p.name AS project_name, u.full_name AS proposer_name 
-            FROM tasks t
-            LEFT JOIN projects p ON t.project_id = p.project_id
-            LEFT JOIN users u ON t.proposed_by_id = u.user_id
-            """)
-            tasks = cursor.fetchall()
-            self.tbl_tasks.setRowCount(0)
-            for r_idx, t in enumerate(tasks):
-                self.tbl_tasks.insertRow(r_idx)
-                self.tbl_tasks.setItem(r_idx, 0, QTableWidgetItem(t["task_id"]))
-                self.tbl_tasks.setItem(r_idx, 1, QTableWidgetItem(t["project_name"] or t["project_id"]))
-                self.tbl_tasks.setItem(r_idx, 2, QTableWidgetItem(t["name"]))
-
-                if t["proposer_name"]:
-                    prop_by = f"{t['proposer_name']} ({t['proposed_by_id']})"
-                elif t["proposed_by_id"]:
-                    prop_by = t["proposed_by_id"]
-                else:
-                    prop_by = "Admin (Direct)"
-                self.tbl_tasks.setItem(r_idx, 3, QTableWidgetItem(prop_by))
-                
-                t_status = "Hidden" if t["is_hidden"] else "Active"
-                self.tbl_tasks.setItem(r_idx, 4, QTableWidgetItem(t_status))
-
-                btn_t_hide = QPushButton("Unhide" if t["is_hidden"] else "Hide / Delete")
-                btn_t_hide.setMinimumWidth(95)
-                if not t["is_hidden"]:
-                    btn_t_hide.setObjectName("DangerButton")
-                btn_t_hide.clicked.connect(lambda _, tid=t["task_id"], h=t["is_hidden"]: self.on_toggle_hide_task(tid, h))
-                self.tbl_tasks.setCellWidget(r_idx, 5, btn_t_hide)
-
-        self.update_task_id_preview()
-
-        # Load Pending Task Proposals
-        pending_proposals = self.db.get_task_proposals(status="PENDING")
-        self.tbl_pending_proposals.setRowCount(0)
-        for r_idx, p in enumerate(pending_proposals):
-            self.tbl_pending_proposals.insertRow(r_idx)
-            self.tbl_pending_proposals.setItem(r_idx, 0, QTableWidgetItem(p["proposal_id"]))
-            self.tbl_pending_proposals.setItem(r_idx, 1, QTableWidgetItem(p["task_id"] or "Pending..."))
-            self.tbl_pending_proposals.setItem(r_idx, 2, QTableWidgetItem(p["project_name"] or p["project_id"]))
-            self.tbl_pending_proposals.setItem(r_idx, 3, QTableWidgetItem(p["task_name"]))
-            
-            p_name = p.get("proposer_name")
-            p_id = p.get("proposed_by_id")
-            prop_display = f"{p_name} ({p_id})" if p_name else p_id
-            self.tbl_pending_proposals.setItem(r_idx, 4, QTableWidgetItem(prop_display))
-            self.tbl_pending_proposals.setItem(r_idx, 5, QTableWidgetItem(p["created_at"]))
-
-            act_widget = QWidget()
-            act_widget.setStyleSheet("background: transparent;")
-            act_layout = QHBoxLayout(act_widget)
-            act_layout.setContentsMargins(6, 2, 6, 2)
-            act_layout.setSpacing(8)
-
-            btn_app = QPushButton("Approve")
-            btn_app.setObjectName("SuccessButton")
-            btn_app.setMinimumWidth(75)
-            btn_app.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_approve_proposal(pid))
-            act_layout.addWidget(btn_app)
-
-            btn_rej = QPushButton("Reject")
-            btn_rej.setObjectName("DangerButton")
-            btn_rej.setMinimumWidth(70)
-            btn_rej.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_reject_proposal(pid))
-            act_layout.addWidget(btn_rej)
-
-            self.tbl_pending_proposals.setCellWidget(r_idx, 6, act_widget)
-
-        if len(pending_proposals) > 0:
-            self.task_subtabs.setTabText(1, f"Pending Approvals ({len(pending_proposals)})")
-        else:
-            self.task_subtabs.setTabText(1, "Pending Approvals")
-
-        # Load Audit Sequence Timeline
-        all_proposals = self.db.get_task_proposals()
-        self.tbl_proposals_timeline.setRowCount(0)
-        for r_idx, p in enumerate(all_proposals):
-            self.tbl_proposals_timeline.insertRow(r_idx)
-            self.tbl_proposals_timeline.setItem(r_idx, 0, QTableWidgetItem(p["proposal_id"]))
-            self.tbl_proposals_timeline.setItem(r_idx, 1, QTableWidgetItem(p["task_id"] or "Pending..."))
-            self.tbl_proposals_timeline.setItem(r_idx, 2, QTableWidgetItem(p["project_name"] or p["project_id"]))
-            self.tbl_proposals_timeline.setItem(r_idx, 3, QTableWidgetItem(p["task_name"]))
-            
-            p_name = p.get("proposer_name")
-            p_id = p.get("proposed_by_id")
-            prop_display = f"{p_name} ({p_id})" if p_name else p_id
-            self.tbl_proposals_timeline.setItem(r_idx, 4, QTableWidgetItem(prop_display))
-            self.tbl_proposals_timeline.setItem(r_idx, 5, QTableWidgetItem(p["created_at"]))
-
-            st_item = QTableWidgetItem(p["status"])
-            if p["status"] == "APPROVED":
-                st_item.setForeground(Qt.green)
-                dec_info = f"Approved by {p['admin_name'] or p['admin_id'] or 'Admin'} on {p['decided_at'] or ''}"
-            elif p["status"] == "REJECTED":
-                st_item.setForeground(Qt.red)
-                dec_info = f"Rejected on {p['decided_at'] or ''}: {p['rejection_reason'] or 'No reason provided'}"
-            else:
-                st_item.setForeground(Qt.yellow)
-                dec_info = "Pending Admin review..."
-
-            self.tbl_proposals_timeline.setItem(r_idx, 6, st_item)
-            self.tbl_proposals_timeline.setItem(r_idx, 7, QTableWidgetItem(dec_info))
-
-        self.reload_analysis_data()
-
-    # ------------------- ANALYSIS TAB -------------------
-    def create_analysis_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        # Summary Metric Cards Row
-        metrics_row = QHBoxLayout()
-
-        card_logs = QFrame()
-        card_logs.setObjectName("CardFrame")
-        cl_layout = QVBoxLayout(card_logs)
-        cl_layout.addWidget(QLabel("Total Progress Logs", objectName="FieldLabel"))
-        self.lbl_metric_logs = QLabel("0", objectName="SubTitle")
-        self.lbl_metric_logs.setStyleSheet("font-size: 22px; font-weight: bold; color: #7C3AED;")
-        cl_layout.addWidget(self.lbl_metric_logs)
-
-        card_rev = QFrame()
-        card_rev.setObjectName("CardFrame")
-        cr_layout = QVBoxLayout(card_rev)
-        cr_layout.addWidget(QLabel("Total Revisions / Rework", objectName="FieldLabel"))
-        self.lbl_metric_revisions = QLabel("0", objectName="SubTitle")
-        self.lbl_metric_revisions.setStyleSheet("font-size: 22px; font-weight: bold; color: #F59E0B;")
-        cr_layout.addWidget(self.lbl_metric_revisions)
-
-        card_prj = QFrame()
-        card_prj.setObjectName("CardFrame")
-        cp_layout = QVBoxLayout(card_prj)
-        cp_layout.addWidget(QLabel("Active Projects", objectName="FieldLabel"))
-        self.lbl_metric_projects = QLabel("0", objectName="SubTitle")
-        self.lbl_metric_projects.setStyleSheet("font-size: 22px; font-weight: bold; color: #10B981;")
-        cp_layout.addWidget(self.lbl_metric_projects)
-
-        card_emp = QFrame()
-        card_emp.setObjectName("CardFrame")
-        ce_layout = QVBoxLayout(card_emp)
-        ce_layout.addWidget(QLabel("Head Employees", objectName="FieldLabel"))
-        self.lbl_metric_employees = QLabel("0", objectName="SubTitle")
-        self.lbl_metric_employees.setStyleSheet("font-size: 22px; font-weight: bold; color: #3B82F6;")
-        ce_layout.addWidget(self.lbl_metric_employees)
-
-        metrics_row.addWidget(card_logs)
-        metrics_row.addWidget(card_rev)
-        metrics_row.addWidget(card_prj)
-        metrics_row.addWidget(card_emp)
-
-        layout.addLayout(metrics_row)
-
-        # Tables Layout
-        tables_layout = QHBoxLayout()
-
-        # Employee Revision Breakdown Table
-        emp_card = QFrame()
-        emp_card.setObjectName("CardFrame")
-        emp_l = QVBoxLayout(emp_card)
-        emp_l.addWidget(QLabel("Employee Rework & Revision Analysis", objectName="SubTitle"))
-
-        self.tbl_emp_analysis = QTableWidget(0, 6)
-        self.tbl_emp_analysis.setHorizontalHeaderLabels([
-            "Employee ID", "Full Name", "Total Logs", "New Tasks", "Continuations", "Revisions (Rework)"
-        ])
-        self.tbl_emp_analysis.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        emp_l.addWidget(self.tbl_emp_analysis)
-        tables_layout.addWidget(emp_card, 1)
-
-        # Project Status & Revision Breakdown Table
-        prj_card = QFrame()
-        prj_card.setObjectName("CardFrame")
-        prj_l = QVBoxLayout(prj_card)
-        prj_l.addWidget(QLabel("Project Task Status & Revision Breakdown", objectName="SubTitle"))
-
-        self.tbl_prj_analysis = QTableWidget(0, 7)
-        self.tbl_prj_analysis.setHorizontalHeaderLabels([
-            "Project ID", "Project Name", "Total Tasks", "Done", "In Progress", "Hold", "Rework Entries"
-        ])
-        self.tbl_prj_analysis.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        prj_l.addWidget(self.tbl_prj_analysis)
-        tables_layout.addWidget(prj_card, 1)
-
-        layout.addLayout(tables_layout)
-
-        btn_refresh = QPushButton("Refresh Analysis Data")
-        btn_refresh.clicked.connect(self.reload_analysis_data)
-        layout.addWidget(btn_refresh)
-
-        return widget
-
-    def reload_analysis_data(self):
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Metric counts
-            cursor.execute("SELECT COUNT(*) AS count FROM progress_logs")
-            row_l = cursor.fetchone()
-            total_logs = row_l["count"] if row_l else 0
-
-            cursor.execute("SELECT COUNT(*) AS count FROM progress_logs WHERE entry_type = 'REVISION'")
-            row_r = cursor.fetchone()
-            total_revisions = row_r["count"] if row_r else 0
-
-            cursor.execute("SELECT COUNT(*) AS count FROM projects WHERE is_hidden = 0")
-            row_p = cursor.fetchone()
-            active_projects = row_p["count"] if row_p else 0
-
-            cursor.execute("SELECT COUNT(*) AS count FROM users WHERE role = 'HEAD'")
-            row_e = cursor.fetchone()
-            active_employees = row_e["count"] if row_e else 0
-
-            self.lbl_metric_logs.setText(str(total_logs))
-            self.lbl_metric_revisions.setText(str(total_revisions))
-            self.lbl_metric_projects.setText(str(active_projects))
-            self.lbl_metric_employees.setText(str(active_employees))
-
-            # Employee Analysis
-            cursor.execute("""
-            SELECT u.user_id, u.full_name,
-                   COUNT(l.log_id) AS total_logs,
-                   SUM(CASE WHEN l.entry_type = 'NEW' THEN 1 ELSE 0 END) AS new_logs,
-                   SUM(CASE WHEN l.entry_type = 'CONTINUATION' THEN 1 ELSE 0 END) AS cont_logs,
-                   SUM(CASE WHEN l.entry_type = 'REVISION' THEN 1 ELSE 0 END) AS rev_logs
-            FROM users u
-            LEFT JOIN progress_logs l ON u.user_id = l.employee_id
-            WHERE u.role = 'HEAD'
-            GROUP BY u.user_id, u.full_name
-            ORDER BY rev_logs DESC, total_logs DESC
-            """)
-            emp_stats = cursor.fetchall()
-            self.tbl_emp_analysis.setRowCount(0)
-            for r_idx, s in enumerate(emp_stats):
-                self.tbl_emp_analysis.insertRow(r_idx)
-                self.tbl_emp_analysis.setItem(r_idx, 0, QTableWidgetItem(s["user_id"]))
-                self.tbl_emp_analysis.setItem(r_idx, 1, QTableWidgetItem(s["full_name"] or s["user_id"]))
-                self.tbl_emp_analysis.setItem(r_idx, 2, QTableWidgetItem(str(s["total_logs"])))
-                self.tbl_emp_analysis.setItem(r_idx, 3, QTableWidgetItem(str(s["new_logs"])))
-                self.tbl_emp_analysis.setItem(r_idx, 4, QTableWidgetItem(str(s["cont_logs"])))
-                
-                rev_item = QTableWidgetItem(str(s["rev_logs"]))
-                if s["rev_logs"] > 0:
-                    rev_item.setForeground(Qt.yellow)
-                self.tbl_emp_analysis.setItem(r_idx, 5, rev_item)
-
-            # Project Analysis
-            cursor.execute("""
-            SELECT p.project_id, p.name AS project_name,
-                   COUNT(DISTINCT t.task_id) AS total_tasks,
-                   SUM(CASE WHEN l.entry_type = 'REVISION' THEN 1 ELSE 0 END) AS total_revisions,
-                   SUM(CASE WHEN l.progress_stage = 'Done' THEN 1 ELSE 0 END) AS done_count,
-                   SUM(CASE WHEN l.progress_stage = 'In Progress' THEN 1 ELSE 0 END) AS in_prog_count,
-                   SUM(CASE WHEN l.progress_stage = 'Hold' THEN 1 ELSE 0 END) AS hold_count
-            FROM projects p
-            LEFT JOIN tasks t ON p.project_id = t.project_id
-            LEFT JOIN progress_logs l ON p.project_id = l.project_id
-            WHERE p.is_hidden = 0
-            GROUP BY p.project_id, p.name
-            """)
-            prj_stats = cursor.fetchall()
-            self.tbl_prj_analysis.setRowCount(0)
-            for r_idx, ps in enumerate(prj_stats):
-                self.tbl_prj_analysis.insertRow(r_idx)
-                self.tbl_prj_analysis.setItem(r_idx, 0, QTableWidgetItem(ps["project_id"]))
-                self.tbl_prj_analysis.setItem(r_idx, 1, QTableWidgetItem(ps["project_name"]))
-                self.tbl_prj_analysis.setItem(r_idx, 2, QTableWidgetItem(str(ps["total_tasks"])))
-                self.tbl_prj_analysis.setItem(r_idx, 3, QTableWidgetItem(str(ps["done_count"])))
-                self.tbl_prj_analysis.setItem(r_idx, 4, QTableWidgetItem(str(ps["in_prog_count"])))
-                self.tbl_prj_analysis.setItem(r_idx, 5, QTableWidgetItem(str(ps["hold_count"])))
-                
-                rev_p_item = QTableWidgetItem(str(ps["total_revisions"]))
-                if ps["total_revisions"] > 0:
-                    rev_p_item.setForeground(Qt.yellow)
-                self.tbl_prj_analysis.setItem(r_idx, 6, rev_p_item)
+    def on_task_date_change_event(self, data: dict):
+        self.toast.show_message("Task Schedule Change Event received.")
+        self.reload_all_data()
 
     def on_logout(self):
         confirm = QMessageBox.question(
@@ -855,4 +1209,36 @@ class AdminWorkspace(QMainWindow):
         if confirm == QMessageBox.Yes:
             self.logout_requested = True
             self.close()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        w = max(self.width(), 1050)
+        sidebar_w = int(w * 0.382)
+        content_w = int(w * 0.618)
+        settings = QSettings("SprintsDeskApp", "AdminWorkspace")
+        emp_sizes = settings.value("emp_splitter_sizes")
+        if emp_sizes and hasattr(self, "emp_splitter"):
+            try:
+                self.emp_splitter.setSizes([int(x) for x in emp_sizes])
+            except Exception:
+                self.emp_splitter.setSizes([sidebar_w, content_w])
+        elif hasattr(self, "emp_splitter"):
+            self.emp_splitter.setSizes([sidebar_w, content_w])
+
+        prj_sizes = settings.value("prj_splitter_sizes")
+        if prj_sizes and hasattr(self, "prj_splitter"):
+            try:
+                self.prj_splitter.setSizes([int(x) for x in prj_sizes])
+            except Exception:
+                self.prj_splitter.setSizes([sidebar_w, content_w])
+        elif hasattr(self, "prj_splitter"):
+            self.prj_splitter.setSizes([sidebar_w, content_w])
+
+    def closeEvent(self, event):
+        settings = QSettings("SprintsDeskApp", "AdminWorkspace")
+        if hasattr(self, "emp_splitter"):
+            settings.setValue("emp_splitter_sizes", self.emp_splitter.sizes())
+        if hasattr(self, "prj_splitter"):
+            settings.setValue("prj_splitter_sizes", self.prj_splitter.sizes())
+        super().closeEvent(event)
 
