@@ -331,7 +331,7 @@ class AdminWorkspace(QMainWindow):
         self.tbl_projects.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.tbl_projects.setColumnWidth(0, 95)
         self.tbl_projects.setColumnWidth(2, 120)
-        self.tbl_projects.setColumnWidth(3, 110)
+        self.tbl_projects.setColumnWidth(3, 190)
         self.tbl_projects.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
         t_layout.addWidget(self.tbl_projects)
 
@@ -364,7 +364,10 @@ class AdminWorkspace(QMainWindow):
 
             btn_hide = QPushButton("Unhide" if p.get("is_hidden") else "Hide")
             btn_hide.clicked.connect(lambda _, pid=p["project_id"], h=p.get("is_hidden", 0): self.on_toggle_hide_project(pid, h))
-            self.tbl_projects.setCellWidget(r_idx, 3, create_table_action_cell([btn_hide]))
+            btn_del = QPushButton("Delete")
+            btn_del.setObjectName("DangerButton")
+            btn_del.clicked.connect(lambda _, pid=p["project_id"], pn=p["name"]: self.on_delete_project(pid, pn))
+            self.tbl_projects.setCellWidget(r_idx, 3, create_table_action_cell([btn_hide, btn_del]))
 
             if not p.get("is_hidden"):
                 self.cmb_task_prj.addItem(f"{p['name']} ({p['project_id']})", p["project_id"])
@@ -395,6 +398,28 @@ class AdminWorkspace(QMainWindow):
             self.txt_prj_desc.clear()
         self.mutate("ADD_PROJECT", {"project_id": pid, "name": pname, "description": pdesc},
                     f"Project '{pname}' added.", added, "Could Not Add Project")
+
+    def on_delete_project(self, project_id: str, name: str):
+        confirm = QMessageBox.question(
+            self, "Delete Project",
+            f"Delete project '{name}' ({project_id})?\n\n"
+            "It and all its tasks will disappear from every screen. Their progress logs stay in the "
+            "database and in Excel exports (marked Deleted). This cannot be undone from the app.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            self.mutate("DELETE_PROJECT", {"project_id": project_id}, f"Project '{name}' deleted.",
+                        error_title="Could Not Delete Project")
+
+    def on_delete_task(self, task_id: str, name: str):
+        confirm = QMessageBox.question(
+            self, "Delete Task",
+            f"Delete task '{name}' ({task_id})?\n\n"
+            "It will disappear from every screen. Its progress logs stay in the database and in Excel "
+            "exports (marked Deleted). This cannot be undone from the app.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            self.mutate("DELETE_TASK", {"task_id": task_id}, f"Task '{name}' deleted.",
+                        error_title="Could Not Delete Task")
 
     def on_toggle_hide_project(self, project_id: str, current_hidden: int):
         self.mutate("TOGGLE_HIDE_PROJECT", {"project_id": project_id, "current_hidden": current_hidden},
@@ -641,7 +666,7 @@ class AdminWorkspace(QMainWindow):
         tbl.setColumnWidth(3, 170)
         tbl.setColumnWidth(4, 185)
         tbl.setColumnWidth(5, 95)
-        tbl.setColumnWidth(6, 180)
+        tbl.setColumnWidth(6, 260)
         tbl.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
 
         for r_idx, t in enumerate(tasks_list):
@@ -664,7 +689,11 @@ class AdminWorkspace(QMainWindow):
             btn_hide = QPushButton("Unhide" if t.get("is_hidden") else "Hide")
             btn_hide.clicked.connect(lambda _, tid=t["task_id"], h=t.get("is_hidden", 0): self.on_toggle_hide_task(tid, h))
 
-            tbl.setCellWidget(r_idx, 6, create_table_action_cell([btn_edit, btn_hide]))
+            btn_del = QPushButton("Delete")
+            btn_del.setObjectName("DangerButton")
+            btn_del.clicked.connect(lambda _, tid=t["task_id"], tn=t["name"]: self.on_delete_task(tid, tn))
+
+            tbl.setCellWidget(r_idx, 6, create_table_action_cell([btn_edit, btn_hide, btn_del]))
 
         return tbl
 
