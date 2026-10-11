@@ -1,106 +1,155 @@
+import asyncio
 import json
 import logging
 import uuid
+
+from PySide6.QtCore import QObject, Signal
+
 from app.database.db_manager import ClientQueueDBManager
-from app.network.client import NetworkClient
+from app.network import protocol as P
+from app.network.client import NetworkClient, ServerError, OfflineError, deliver
 
 logger = logging.getLogger(__name__)
 
-class SyncService:
-    def __init__(self, network_client: NetworkClient):
+# Head actions that go through the persistent outbox, and the payload field holding their unique ID.
+QUEUED_ACTIONS = {
+    "SUBMIT_LOG": ("log_id", "LOG"),
+    "PROPOSE_TASK": ("proposal_id", "PROP"),
+    "REQUEST_TASK_DATE_CHANGE": ("request_id", "DCR"),
+    "RESPOND_NOTIFICATION": ("notification_id", None),  # ID comes from the server-issued alert
+}
+
+RETRY_INTERVAL_SECONDS = 30
+
+
+class SyncService(QObject):
+    """
+    Reliable outbox for a logged-in Head:
+    every item is written to client_queue.db first, sent when connected, and deleted only after the
+    Central Server confirms it. Items the server permanently rejects are kept as FAILED and shown to
+    the user (retry or discard). Transient failures stay PENDING and are retried automatically.
+    """
+    item_synced = Signal(str, str, dict)  # (action, item_id, server reply)
+    item_failed = Signal(str, str, str)   # (action, item_id, error message)
+    queue_changed = Signal(int, int)      # (pending_count, failed_count)
+
+    def __init__(self, network_client: NetworkClient, user_id: str, queue_db: ClientQueueDBManager = None):
+        super().__init__()
         self.net_client = network_client
-        self.queue_db = ClientQueueDBManager()
-        # Connect to network signals
+        self.user_id = user_id
+        self.queue_db = queue_db or ClientQueueDBManager()
+        self._flush_lock = asyncio.Lock()
+        self._retry_task = None
         self.net_client.connection_status_changed.connect(self.on_connection_status_changed)
-        self.net_client.ack_received.connect(self.on_ack_received)
 
-    def submit_progress_log(self, log_payload: dict) -> bool:
-        """
-        Submits progress log. Generates UUID before queuing (B4).
-        Always persists to queue first, transmits if connected,
-        and deletes only after ACK from Central Server.
-        """
-        if not log_payload.get("log_id"):
-            log_payload["log_id"] = f"LOG-{uuid.uuid4().hex[:8].upper()}"
+    # ------------------------------------------------------------------ public API
+    @staticmethod
+    def new_id(action: str) -> str:
+        prefix = QUEUED_ACTIONS[action][1] or "ID"
+        return f"{prefix}-{uuid.uuid4().hex.upper()}"
 
-        payload_str = json.dumps(log_payload)
-        self.queue_db.add_to_queue("SUBMIT_LOG", payload_str)
+    def submit(self, action: str, payload: dict) -> str:
+        """Persist the item, then try to send it. Returns the item's unique ID."""
+        id_field, _ = QUEUED_ACTIONS[action]
+        if not payload.get(id_field):
+            payload[id_field] = self.new_id(action)
+        item_id = payload[id_field]
+        self.queue_db.enqueue(self.user_id, action, item_id, payload)
+        self._notify_counts()
+        self.schedule_flush()
+        return item_id
 
-        if self.net_client.is_connected:
-            self.net_client.send_action("SUBMIT_LOG", log_payload)
-            return True
-        else:
-            logger.info(f"Offline: Progress log queued locally for user {log_payload.get('employee_id')}")
-            return False
+    # Convenience wrappers used by the Head workspace
+    def submit_progress_log(self, payload: dict) -> str:
+        return self.submit("SUBMIT_LOG", payload)
 
-    def respond_priority_notification(self, response_payload: dict) -> bool:
-        """Responds to COO priority alert; deletes only upon server ACK."""
-        payload_str = json.dumps(response_payload)
-        self.queue_db.add_to_queue("RESPOND_NOTIFICATION", payload_str)
+    def propose_task(self, payload: dict) -> str:
+        return self.submit("PROPOSE_TASK", payload)
 
-        if self.net_client.is_connected:
-            self.net_client.send_action("RESPOND_NOTIFICATION", response_payload)
-            return True
-        else:
-            logger.info("Offline: Priority notification response queued locally")
-            return False
+    def request_date_change(self, payload: dict) -> str:
+        return self.submit("REQUEST_TASK_DATE_CHANGE", payload)
 
-    def propose_task(self, proposal_payload: dict) -> bool:
-        """Queues task proposal; deletes upon ACK."""
-        if not proposal_payload.get("proposal_id"):
-            proposal_payload["proposal_id"] = f"PROP-{uuid.uuid4().hex[:8].upper()}"
+    def respond_priority_notification(self, payload: dict) -> str:
+        return self.submit("RESPOND_NOTIFICATION", payload)
 
-        payload_str = json.dumps(proposal_payload)
-        self.queue_db.add_to_queue("PROPOSE_TASK", payload_str)
+    def pending_count(self) -> int:
+        return self.queue_db.count(self.user_id, "PENDING")
 
-        if self.net_client.is_connected:
-            self.net_client.send_action("PROPOSE_TASK", proposal_payload)
-            return True
-        return False
-
-    def request_date_change(self, request_payload: dict) -> bool:
-        """Queues task date change request; deletes upon ACK."""
-        if not request_payload.get("request_id"):
-            request_payload["request_id"] = f"DCR-{uuid.uuid4().hex[:8].upper()}"
-
-        payload_str = json.dumps(request_payload)
-        self.queue_db.add_to_queue("REQUEST_TASK_DATE_CHANGE", payload_str)
-
-        if self.net_client.is_connected:
-            self.net_client.send_action("REQUEST_TASK_DATE_CHANGE", request_payload)
-            return True
-        return False
-
-    def on_ack_received(self, ack_data: dict):
-        """
-        Reliable ACK Handler (B4):
-        Server confirmed write. Delete matching item from client_queue.db.
-        """
-        action = ack_data.get("action")
-        item_id = ack_data.get("id")
-        status = ack_data.get("status")
-
-        if status == "SUCCESS" and action and item_id:
-            self.queue_db.delete_queued_by_payload_id(action, item_id)
-            logger.info(f"Received ACK for {action} id={item_id}; purged from local queue.")
+    def failed_count(self) -> int:
+        return self.queue_db.count(self.user_id, "FAILED")
 
     def get_pending_queue_count(self) -> int:
-        return len(self.queue_db.get_all_queued())
+        return self.pending_count()
 
+    def failed_items(self) -> list[dict]:
+        items = self.queue_db.get_items(self.user_id, "FAILED")
+        for it in items:
+            it["payload"] = json.loads(it["payload_json"])
+        return items
+
+    def retry_failed(self, queue_id: int):
+        self.queue_db.retry_item(queue_id)
+        self._notify_counts()
+        self.schedule_flush()
+
+    def discard_failed(self, queue_id: int):
+        self.queue_db.delete_item(queue_id)
+        self._notify_counts()
+
+    # ------------------------------------------------------------------ sending
     def on_connection_status_changed(self, is_connected: bool, status_msg: str):
         if is_connected:
-            self.flush_offline_queue()
+            self.schedule_flush()
+            if self._retry_task is None or self._retry_task.done():
+                self._retry_task = asyncio.ensure_future(self._periodic_retry())
 
-    def flush_offline_queue(self):
-        queued_items = self.queue_db.get_all_queued()
-        if not queued_items:
+    def schedule_flush(self):
+        if self.net_client.is_connected:
+            asyncio.ensure_future(self.flush_offline_queue())
+
+    async def _periodic_retry(self):
+        while self.net_client.running:
+            await asyncio.sleep(RETRY_INTERVAL_SECONDS)
+            if self.net_client.is_connected and self.pending_count():
+                await self.flush_offline_queue()
+
+    async def flush_offline_queue(self):
+        """Send PENDING items in order. Stops at the first transient failure to preserve ordering."""
+        if self._flush_lock.locked():
             return
-
-        logger.info(f"Reconnected: Flushing {len(queued_items)} queued offline items to Central Server...")
-        for item in queued_items:
-            event_type = item["event_type"]
-            try:
+        async with self._flush_lock:
+            for item in self.queue_db.get_items(self.user_id, "PENDING"):
+                if not self.net_client.is_connected:
+                    break
+                action = item["event_type"]
                 payload = json.loads(item["payload_json"])
-                self.net_client.send_action(event_type, payload)
-            except Exception as e:
-                logger.error(f"Error flushing queued item {item['queue_id']}: {e}")
+                self.queue_db.mark_attempt(item["queue_id"])
+                try:
+                    reply = await self.net_client.request(action, payload, timeout=20)
+                except ServerError as e:
+                    if e.code in P.PERMANENT_ERROR_CODES:
+                        logger.warning("Server rejected queued %s %s: %s", action, item["item_id"], e)
+                        self.queue_db.mark_failed(item["queue_id"], str(e))
+                        self._notify_counts()
+                        deliver_signal(self.item_failed, action, item["item_id"], str(e))
+                        continue
+                    logger.info("Queued %s %s will be retried: %s", action, item["item_id"], e)
+                    break
+                except (OfflineError, TimeoutError, ConnectionError) as e:
+                    logger.info("Sync paused: %s", e)
+                    break
+                self.queue_db.delete_item(item["queue_id"])
+                self._notify_counts()
+                deliver_signal(self.item_synced, action, item["item_id"], reply)
+
+    def _notify_counts(self):
+        deliver_signal(self.queue_changed, self.pending_count(), self.failed_count())
+
+    def stop(self):
+        if self._retry_task is not None:
+            self._retry_task.cancel()
+
+
+
+def deliver_signal(signal, *args):
+    deliver(signal.emit, *args)
