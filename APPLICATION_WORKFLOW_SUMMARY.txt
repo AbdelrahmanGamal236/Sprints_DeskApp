@@ -122,6 +122,10 @@ B. data/client_queue.db (each workstation)
   - Project selector on top; the discipline tab lists only the Head's
     discipline tasks for that project (server-filtered; pinned tasks only for
     their Head).
+  - Selecting a task prefills start/end date with the task's planned dates
+    (from the approved request or a later date change; today if none) and
+    shows "Planned: X to Y". The dates stay editable so a log records when
+    the work really happened.
   - Form: start/end date, entry type (New/Continuation/Revision; the R-number
     preview comes from the server, the final number is assigned on save),
     progress stage and %, Assigned To, notes -> Submit.

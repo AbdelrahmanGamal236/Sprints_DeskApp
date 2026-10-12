@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import unittest
 
+from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QApplication
 
 from tests.helpers import start_server, wait_until, PASSWORD
@@ -78,10 +79,17 @@ class TestGuiSmoke(unittest.TestCase):
                 await logout(ctrl)
 
                 # ---- Head: projects/tasks load, submit a log, toast reflects the server ACK
+                for tid in ("T-URB", "T-URB2"):  # planned dates, as an approved request would set them
+                    server.db.update_task(tid, planned_start_date="2026-03-02", planned_end_date="2026-03-20")
                 ws = await login(ctrl, "h_urb")
                 self.assertTrue(await wait_until(lambda: ws.cmb_projects.count() == 3))
                 self.assertTrue(await wait_until(lambda: ws.lst_tasks.count() == 1))
                 ws.lst_tasks.setCurrentRow(0)
+                # Entry dates are prefilled from the task's planned dates and stay editable
+                self.assertEqual(ws.dt_start.date().toString("yyyy-MM-dd"), "2026-03-02")
+                self.assertEqual(ws.dt_end.date().toString("yyyy-MM-dd"), "2026-03-20")
+                self.assertIn("2026-03-02 to 2026-03-20", ws.lbl_planned.text())
+                ws.dt_end.setDate(QDate(2026, 3, 25))
                 ws.txt_notes.setPlainText("Smoke test log")
                 ws.spn_percentage.setValue(40)
                 ws.on_submit_log()
@@ -89,6 +97,7 @@ class TestGuiSmoke(unittest.TestCase):
                     lambda: any(l["notes"] == "Smoke test log" for l in server.db.get_progress_logs())))
                 stored = next(l for l in server.db.get_progress_logs() if l["notes"] == "Smoke test log")
                 self.assertEqual(stored["progress_percentage"], 40)
+                self.assertEqual((stored["start_date"], stored["end_date"]), ("2026-03-02", "2026-03-25"))
                 self.assertTrue(await wait_until(lambda: "saved on the Central Server" in ws.toast.label.text()))
                 overlay = ws.toast._overlay()
                 self.assertTrue(overlay.isVisible())

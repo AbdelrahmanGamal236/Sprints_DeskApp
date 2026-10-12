@@ -356,6 +356,7 @@ class HeadWorkspace(QMainWindow):
         self.lst_tasks = QListWidget()
         self.lst_tasks.setSelectionMode(QAbstractItemView.SingleSelection)
         self.lst_tasks.itemSelectionChanged.connect(self.update_revision_tag_display)
+        self.lst_tasks.itemSelectionChanged.connect(self.on_task_selected)
 
         self.discipline_label = self.user.get("discipline_name") or self.discipline_id or "Unassigned"
         tab_title = f"{self.discipline_label} (0)"
@@ -400,6 +401,10 @@ class HeadWorkspace(QMainWindow):
         e_box.addWidget(self.dt_end)
         dates_row.addLayout(e_box)
         right_vbox.addLayout(dates_row)
+        # Planned dates of the selected task, kept visible so a Head sees when the entry differs from the plan
+        self.lbl_planned = QLabel("")
+        self.lbl_planned.setStyleSheet("color: #A1A1AA; font-size: 11px;")
+        right_vbox.addWidget(self.lbl_planned)
 
         # Task Logging Context / Rework Tag (R1, R2...)
         right_vbox.addWidget(QLabel("Entry Type:", objectName="FieldLabel"))
@@ -595,6 +600,27 @@ class HeadWorkspace(QMainWindow):
             self.net_client.call("GET_PROJECT_TIMELINE", {"project_id": p_id},
                                  lambda r: self.proj_timeline_widget.load_timeline_data(r.get("data", {})),
                                  self.on_request_error)
+
+    def on_task_selected(self):
+        """Prefill the entry dates with the task's planned dates (from the approved request or a later
+        date change). They stay editable: a log records when the work really happened, which may differ."""
+        items = self.lst_tasks.selectedItems()
+        if not items:
+            self.lbl_planned.setText("")
+            return
+        t = items[0].data(Qt.UserRole + 2) or {}
+        p_start = QDate.fromString(t.get("planned_start_date") or "", "yyyy-MM-dd")
+        p_end = QDate.fromString(t.get("planned_end_date") or "", "yyyy-MM-dd")
+        today = QDate.currentDate()
+        start = p_start if p_start.isValid() else today
+        end = p_end if p_end.isValid() and p_end >= start else start
+        self.dt_start.setDate(start)
+        self.dt_end.setDate(end)
+        if p_start.isValid() or p_end.isValid():
+            self.lbl_planned.setText(f"Planned: {t.get('planned_start_date') or 'TBD'} to "
+                                     f"{t.get('planned_end_date') or 'TBD'}")
+        else:
+            self.lbl_planned.setText("Planned: no dates set for this task")
 
     def update_revision_tag_display(self):
         if self.rb_revision.isChecked():
