@@ -1,4 +1,5 @@
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTabWidget,
     QMessageBox, QTableWidget, QHeaderView, QSplitter, QDialog, QFormLayout, QSpinBox, QFrame, QGridLayout
@@ -155,8 +156,9 @@ class SuperAdminPanel(QWidget):
         tbl_w = QWidget()
         t_layout = QVBoxLayout(tbl_w)
         t_layout.addWidget(QLabel("All System User Accounts", objectName="SubTitle"))
-        self.tbl_users = QTableWidget(0, 6)
-        self.tbl_users.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Discipline", "Must Change Password", "Actions"])
+        self.tbl_users = QTableWidget(0, 7)
+        self.tbl_users.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Discipline", "Must Change Password",
+                                                  "Password", "Actions"])
         setup_modern_table(self.tbl_users, row_height=46)
         self.tbl_users.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.tbl_users.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -164,8 +166,9 @@ class SuperAdminPanel(QWidget):
         self.tbl_users.setColumnWidth(2, 105)
         self.tbl_users.setColumnWidth(3, 130)
         self.tbl_users.setColumnWidth(4, 150)
-        self.tbl_users.setColumnWidth(5, 190)
-        self.tbl_users.horizontalHeader().setSectionResizeMode(5, QHeaderView.Fixed)
+        self.tbl_users.setColumnWidth(5, 150)
+        self.tbl_users.setColumnWidth(6, 190)
+        self.tbl_users.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
         t_layout.addWidget(self.tbl_users)
         self.accounts_splitter.addWidget(CollapsiblePanel("Accounts Directory", tbl_w, horizontal=True))
         self.accounts_splitter.setSizes([350, 650])
@@ -187,12 +190,17 @@ class SuperAdminPanel(QWidget):
             d_str = u.get("discipline_name") or u.get("discipline_id") or "N/A"
             self.tbl_users.setItem(r_idx, 3, create_table_item(d_str, Qt.AlignCenter))
             self.tbl_users.setItem(r_idx, 4, create_table_item("Yes" if u.get("must_change_password") else "No", Qt.AlignCenter))
+            # Passwords set before readable copies existed show "Unknown" until that user's next login
+            pwd_item = create_table_item(u.get("password_plain") or "Unknown (log in once)", Qt.AlignCenter)
+            if not u.get("password_plain"):
+                pwd_item.setForeground(QColor("#A1A1AA"))
+            self.tbl_users.setItem(r_idx, 5, pwd_item)
             btn_edit = QPushButton("Edit")
             btn_edit.clicked.connect(lambda _, user=u: self.on_edit_user(user))
             btn_reset = QPushButton("Reset Pass")
             btn_reset.clicked.connect(lambda _, uid=u["user_id"]: self.on_reset_pass(uid))
             btn_reset.setEnabled(u["user_id"] != self.user["user_id"])
-            self.tbl_users.setCellWidget(r_idx, 5, create_table_action_cell([btn_edit, btn_reset]))
+            self.tbl_users.setCellWidget(r_idx, 6, create_table_action_cell([btn_edit, btn_reset]))
 
     def on_create_user(self):
         uid = self.txt_user_id.text().strip()

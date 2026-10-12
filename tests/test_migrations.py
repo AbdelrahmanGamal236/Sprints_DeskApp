@@ -49,6 +49,7 @@ class MigrationTestBase(unittest.TestCase):
         for table in ("projects", "tasks"):
             cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
             self.assertTrue({"is_deleted", "deleted_at", "deleted_by"} <= cols, table)
+        self.assertIn("password_plain", {r[1] for r in con.execute("PRAGMA table_info(users)")})
         log_cols = {r[1] for r in con.execute("PRAGMA table_info(progress_logs)")}
         self.assertTrue({"discipline_id", "assigned_to", "entry_type", "revision_number"} <= log_cols)
         con.close()
@@ -70,6 +71,10 @@ class TestMigrationFromFixtures(MigrationTestBase):
         legacy_hex = h.split("$")[-1]  # old format: bare hex digest at 100k iterations
         con.execute("INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) "
                     "VALUES ('h1', 'Head One', ?, ?, 'HEAD', 0)", (legacy_hex, salt))
+        # Never-used account whose password is still its user ID (its readable copy can be filled in)
+        h2_hash, h2_salt = hash_password("h2")
+        con.execute("INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) "
+                    "VALUES ('h2', 'Head Two', ?, ?, 'HEAD', 1)", (h2_hash, h2_salt))
         con.execute("INSERT INTO projects (project_id, name) VALUES ('P1', 'Old project')")
         con.execute("INSERT INTO tasks (task_id, project_id, name) VALUES ('TSK-07', 'P1', 'Old task')")
         con.execute("""INSERT INTO progress_logs (log_id, employee_id, project_id, task_id, start_date, end_date,
@@ -93,10 +98,15 @@ class TestMigrationFromFixtures(MigrationTestBase):
         self.assertEqual(logs["L-OLD"]["project_deleted"], 0)
         # Legacy password hash still works and is upgraded on login (production work factor patched in;
         # the test suite otherwise runs with a low iteration count)
+        # Readable passwords: known only where it is still the user ID, until the user's next login
+        plain = {u["user_id"]: u["password_plain"] for u in db.get_users(include_passwords=True)}
+        self.assertEqual((plain["h1"], plain["h2"]), (None, "h2"))
         from unittest import mock
         from app.core import auth
         with mock.patch.object(auth, "PBKDF2_ITERATIONS", 600000):
             self.assertIsNotNone(db.authenticate("h1", "Legacy-Pass-1"))
+        self.assertEqual(next(u for u in db.get_users(include_passwords=True)
+                              if u["user_id"] == "h1")["password_plain"], "Legacy-Pass-1")
         self.assertTrue(db.get_user("h1")["password_hash"].startswith("pbkdf2_sha256$"))
         # Revision numbering continues from the existing data
         self.assertEqual(db.get_next_revision_number("h1", "P1", "TSK-07"), 2)

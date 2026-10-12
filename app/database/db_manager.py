@@ -21,7 +21,7 @@ PASSWORD_MIN_LENGTH = 8
 LEGACY_DEFAULT_PRIVILEGED_IDS = ("superadmin", "admin", "coo")
 
 # Current schema version (PRAGMA user_version); see DBManager._migrate
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # System settings managed by the Super Admin: key -> (default, type, min, max, label)
 SYSTEM_SETTINGS = {
@@ -398,12 +398,32 @@ class DBManager:
                 cur.execute("PRAGMA user_version = 4")
             logger.info("Database migrated to schema version 4 (system settings).")
 
+        if version < 5:
+            # Readable password copy, shown to the Super Admin only (owner's decision). Accounts that still
+            # use their initial password (= user ID) are filled in now; others fill in at their next login.
+            with self.transaction() as cur:
+                if "password_plain" not in columns(cur, "users"):
+                    cur.execute("ALTER TABLE users ADD COLUMN password_plain TEXT")
+                cur.execute("""SELECT user_id, password_hash, password_salt FROM users
+                               WHERE must_change_password = 1 AND password_plain IS NULL""")
+                for row in cur.fetchall():
+                    if verify_password(row["user_id"], row["password_hash"], row["password_salt"]):
+                        cur.execute("UPDATE users SET password_plain = ? WHERE user_id = ?",
+                                    (row["user_id"], row["user_id"]))
+                cur.execute("PRAGMA user_version = 5")
+            logger.info("Database migrated to schema version 5 (readable passwords for the Super Admin).")
+
         with self.get_connection() as conn:
             orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
         if orphans:
             # Old rows that reference missing users/projects/tasks are kept (never deleted), only reported.
             logger.warning("Database contains %d rows with dangling references (kept as-is): %s",
                            len(orphans), sorted({r[0] for r in orphans}))
+
+    @staticmethod
+    def _remember_password(cursor, user_id: str, password: str):
+        """Keeps the readable copy shown to the Super Admin in step with every password change."""
+        cursor.execute("UPDATE users SET password_plain = ? WHERE user_id = ?", (password, user_id))
 
     def emergency_reset_superadmin(self) -> str:
         """
@@ -420,6 +440,7 @@ class DBManager:
             else:
                 cur.execute("""INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
                                VALUES ('superadmin', 'System Super Admin', ?, ?, ?, 1)""", (pwd_hash, pwd_salt, ROLE_SUPER_ADMIN))
+            self._remember_password(cur, "superadmin", pwd)
             cur.execute("DELETE FROM user_sessions WHERE user_id = 'superadmin'")
         return pwd
 
@@ -448,6 +469,7 @@ class DBManager:
                     cursor.execute("""INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password)
                                       VALUES ('superadmin', 'System Super Admin', ?, ?, ?, 1)""",
                                    (pwd_hash, pwd_salt, ROLE_SUPER_ADMIN))
+                self._remember_password(cursor, "superadmin", pwd)
                 issued.append(("superadmin", pwd))
 
             placeholders = ",".join("?" * len(LEGACY_DEFAULT_PRIVILEGED_IDS))
@@ -462,6 +484,7 @@ class DBManager:
                     pwd_hash, pwd_salt = hash_password(pwd)
                     cursor.execute("UPDATE users SET password_hash = ?, password_salt = ? WHERE user_id = ?",
                                    (pwd_hash, pwd_salt, row["user_id"]))
+                    self._remember_password(cursor, row["user_id"], pwd)
                     issued.append((row["user_id"], pwd))
             conn.commit()
         return issued
@@ -493,6 +516,7 @@ class DBManager:
                         "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password) VALUES (?, ?, ?, ?, ?, 1)",
                         (uid, name, pwd_hash, pwd_salt, role)
                     )
+                    self._remember_password(cursor, uid, uid)
 
             # Demo Head 1001 and sample projects
             cursor.execute("SELECT * FROM users WHERE user_id = '1001'")
@@ -502,6 +526,7 @@ class DBManager:
                     "INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password, discipline_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     ("1001", "Eng. Abdelrahman", pwd_hash, pwd_salt, ROLE_HEAD, 1, "AI")
                 )
+                self._remember_password(cursor, "1001", "1001")
 
             # Sample projects if empty
             cursor.execute("SELECT * FROM projects")
@@ -583,6 +608,7 @@ class DBManager:
                 INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password, discipline_id)
                 VALUES (?, ?, ?, ?, ?, 1, ?)
                 """, (user_id, full_name, pwd_hash, pwd_salt, ROLE_HEAD, discipline_id))
+                self._remember_password(cursor, user_id, user_id)
 
                 logger.info(f"Successfully seeded Head: '{user_id}' ({full_name}) - Discipline: '{discipline_id}'")
 
@@ -709,12 +735,14 @@ class DBManager:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def get_users(self, role: str = None, discipline_id: str = None) -> list[dict]:
+    def get_users(self, role: str = None, discipline_id: str = None, include_passwords: bool = False) -> list[dict]:
+        """include_passwords adds the readable password; the server passes it for the Super Admin only."""
+        password_col = ", u.password_plain" if include_passwords else ""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            query = """
+            query = f"""
             SELECT u.user_id, u.full_name, u.role, u.must_change_password,
-                   u.discipline_id, d.name AS discipline_name, u.created_at
+                   u.discipline_id, d.name AS discipline_name, u.created_at{password_col}
             FROM users u
             LEFT JOIN disciplines d ON u.discipline_id = d.discipline_id
             WHERE 1=1
@@ -761,6 +789,7 @@ class DBManager:
             INSERT INTO users (user_id, full_name, password_hash, password_salt, role, must_change_password, discipline_id)
             VALUES (?, ?, ?, ?, ?, 1, ?)
             """, (user_id, full_name, pwd_hash, pwd_salt, role, discipline_id))
+            self._remember_password(cursor, user_id, user_id)
 
             conn.commit()
 
@@ -816,6 +845,7 @@ class DBManager:
             cursor.execute("""
             UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 1 WHERE user_id = ?
             """, (pwd_hash, pwd_salt, user_id))
+            self._remember_password(cursor, user_id, user_id)
             conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
             conn.commit()
         return {"user_id": user_id, "status": "RESET_SUCCESS"}
@@ -848,6 +878,7 @@ class DBManager:
             cursor.execute("""
             UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 0 WHERE user_id = ?
             """, (pwd_hash, pwd_salt, user_id))
+            self._remember_password(cursor, user_id, new_password)
             conn.commit()
         return True
 
@@ -957,6 +988,11 @@ class DBManager:
             with self.get_connection() as conn:
                 conn.execute("UPDATE users SET password_hash = ?, password_salt = ? WHERE user_id = ?",
                              (pwd_hash, pwd_salt, user["user_id"]))
+                conn.commit()
+        if user.get("password_plain") != password:
+            # Accounts whose password was set before readable copies existed are filled in at login
+            with self.get_connection() as conn:
+                self._remember_password(conn, user["user_id"], password)
                 conn.commit()
         return user
 

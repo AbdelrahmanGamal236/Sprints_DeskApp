@@ -515,7 +515,8 @@ class CentralWebSocketServer:
         role = payload.get("role")
         if session.role in (ROLE_ADMIN, ROLE_COO):
             role = ROLE_HEAD  # Admin manages Heads only; COO only needs the Heads list
-        return {"users": await self.db_call(self.db.get_users, role=role, discipline_id=payload.get("discipline_id"))}
+        return {"users": await self.db_call(self.db.get_users, role=role, discipline_id=payload.get("discipline_id"),
+                                            include_passwords=session.role == ROLE_SUPER_ADMIN)}
 
     @action("CREATE_USER", roles=MANAGERS, response_type="CREATE_USER_RESPONSE")
     async def a_create_user(self, ws, session, payload, msg_id):

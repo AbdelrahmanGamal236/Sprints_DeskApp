@@ -51,7 +51,10 @@ A. data/central_app.db (server only). Schema version in PRAGMA user_version.
   users              user_id PK (fingerprint ID or name), full_name,
                      password_hash ("pbkdf2_sha256$600000$<hex>"),
                      password_salt, role (HEAD|ADMIN|COO|SUPER_ADMIN),
-                     must_change_password, discipline_id (Heads only)
+                     must_change_password, discipline_id (Heads only),
+                     password_plain (readable copy for the Super Admin's
+                     Password column; filled in at the next login for
+                     passwords set before schema v5)
   projects           project_id PK, name, description, is_hidden,
                      is_deleted, deleted_at, deleted_by
   tasks              task_id PK (TSK-NN), project_id, name, description,
@@ -178,7 +181,9 @@ B. data/client_queue.db (each workstation)
   Everything Admin and COO can do (their panels are embedded) plus: create and
   edit ADMIN/COO/SUPER_ADMIN accounts (the last Super Admin cannot be
   demoted) and System Settings (backup time and retention, password minimum
-  length, session lifetime) with server status.
+  length, session lifetime) with server status. The accounts table has a
+  Password column with each user's current password (Super Admin only; the
+  server never sends it to Admin or COO).
 
 4.10 Excel export (server-side)
   EXPORT_EXCEL_REQUEST {project_id, discipline_id, employee_id, start_date,

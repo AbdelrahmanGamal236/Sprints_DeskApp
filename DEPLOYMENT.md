@@ -165,6 +165,10 @@ DeskAppServer.exe --restore data\backups\central_app_20261012_020000.db
    - The restore is refused while the server is running.
 5. Start the server again with `Launch_Server_Daemon.bat`.
 
+### Keep the database and backups private
+
+The Super Admin can see every user's password in the accounts table, and those passwords are stored in readable form in `central_app.db` and in every backup copy. Anyone who gets a copy of the `data` folder can read them. Keep the server PC locked, don't share the `data` folder on the network, and store backup copies somewhere only IT can open.
+
 ### What to back up when moving the server to a new PC
 
 Stop the server and copy the whole `C:\DeskApp\data` folder to the new PC (into `C:\DeskApp\data`). Then follow steps 1, 3 and 2 on the new PC, and give everyone the new IP address.

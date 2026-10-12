@@ -293,6 +293,35 @@ class TestIdentityAndScope(unittest.TestCase):
         run(scenario())
 
 
+class TestReadablePasswords(unittest.TestCase):
+    def test_only_super_admin_receives_passwords(self):
+        async def scenario():
+            server = await start_server()
+            try:
+                sa = await raw_login(server.port, "sa")
+                users = {u["user_id"]: u for u in (await sa.req("GET_USERS", {}))["users"]}
+                self.assertEqual(users["h_urb"]["password_plain"], PASSWORD)
+                self.assertEqual(users["h_new"]["password_plain"], "h_new")  # initial password = user ID
+                # A password change and a reset keep the readable copy current
+                h = await raw_login(server.port, "h_urb")
+                r = await h.req("CHANGE_PASSWORD", {"new_password": "Another-Pass-9", "old_password": PASSWORD})
+                self.assertTrue(r["ok"], r)
+                users = {u["user_id"]: u for u in (await sa.req("GET_USERS", {}))["users"]}
+                self.assertEqual(users["h_urb"]["password_plain"], "Another-Pass-9")
+                self.assertTrue((await sa.req("RESET_PASSWORD", {"user_id": "h_urb"}))["ok"])
+                users = {u["user_id"]: u for u in (await sa.req("GET_USERS", {}))["users"]}
+                self.assertEqual(users["h_urb"]["password_plain"], "h_urb")
+                # Admin and COO never receive passwords
+                for uid in ("adm", "coo1"):
+                    c = await raw_login(server.port, uid)
+                    r = await c.req("GET_USERS", {})
+                    self.assertTrue(r["ok"] and r["users"], r)
+                    self.assertTrue(all("password_plain" not in u for u in r["users"]), uid)
+            finally:
+                await server.stop()
+        run(scenario())
+
+
 class TestSettingsAndEvents(unittest.TestCase):
     def test_system_settings(self):
         async def scenario():

@@ -34,10 +34,11 @@ DeskAppServer.exe (main.py --server-only)  DeskApp.exe (main.py)
 
 ## Data model notes
 
-- Schema migrations: `DBManager._migrate()`, tracked with `PRAGMA user_version` (currently `SCHEMA_VERSION = 4`). Add a new numbered step; each step must be idempotent and run in a transaction. Test it against the fixtures in `tests/fixtures/` and against real DB copies (`tests/test_migrations.py`). **Never delete or rewrite user data in a migration**; report dangling rows instead.
+- Schema migrations: `DBManager._migrate()`, tracked with `PRAGMA user_version` (currently `SCHEMA_VERSION = 5`). Add a new numbered step; each step must be idempotent and run in a transaction. Test it against the fixtures in `tests/fixtures/` and against real DB copies (`tests/test_migrations.py`). **Never delete or rewrite user data in a migration**; report dangling rows instead.
 - **Soft delete:** `projects.is_deleted` / `tasks.is_deleted`. Deleted rows disappear from every list but keep their logs; Excel labels them "(Deleted)". **Hide** (`is_hidden`) is a separate, reversible flag.
 - **Revision numbers** (R1, R2...) are assigned by the server per task, inside the insert transaction. **Task IDs** (`TSK-NN`) are assigned when the task is created, never reserved earlier.
 - Timestamps are local time, `YYYY-MM-DD HH:MM:SS`. Dates are `YYYY-MM-DD`. Use `now_local()`, `parse_date()` and `check_date_order()` from `db_manager.py`.
+- Passwords are stored as a PBKDF2 hash (used for login) **and**, by the owner's decision, as a readable copy `users.password_plain` shown only to the Super Admin (`GET_USERS` adds it for that role only). Every place that sets a password must call `_remember_password()`; `authenticate()` fills it in for accounts set before v5. Never send it to other roles or write it to logs.
 - Accounts: the first start creates `superadmin` with a random one-time password, printed on the server console and saved to `data/FIRST_RUN_CREDENTIALS.txt`. New accounts start with password = user ID and must change it. The password minimum length is a system setting (`system_settings` table).
 - Disciplines: `URB, STR, INT, ARC, BIM, MEC, ELE, AI, QC, Infrastructure` (`config.DEFAULT_DISCIPLINES`). Heads are seeded idempotently from `data/seed_heads.json`.
 
