@@ -334,40 +334,49 @@ QLabel#SyncBadgeDisconnected {
     font-size: 11px;
 }
 
-/* Sleek Modern Scrollbars */
+/* Scrollbars: wide enough to grab easily, visible handle, purple while hovered or dragged.
+   The track (add-page/sub-page) is styled too: clicking it jumps a page. */
 QScrollBar:vertical {
     background-color: #18181B;
-    width: 8px;
-    margin: 0px;
-    border-radius: 4px;
+    width: 14px;
+    margin: 2px 2px 2px 2px;
+    border: none;
+    border-radius: 5px;
 }
 QScrollBar::handle:vertical {
-    background-color: #3F3F46;
-    min-height: 24px;
-    border-radius: 4px;
-}
-QScrollBar::handle:vertical:hover {
-    background-color: #8B5CF6;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-    height: 0px;
+    background-color: #52525B;
+    min-height: 36px;
+    border-radius: 5px;
 }
 QScrollBar:horizontal {
     background-color: #18181B;
-    height: 8px;
-    margin: 0px;
-    border-radius: 4px;
+    height: 14px;
+    margin: 2px 2px 2px 2px;
+    border: none;
+    border-radius: 5px;
 }
 QScrollBar::handle:horizontal {
-    background-color: #3F3F46;
-    min-width: 24px;
-    border-radius: 4px;
+    background-color: #52525B;
+    min-width: 36px;
+    border-radius: 5px;
 }
-QScrollBar::handle:horizontal:hover {
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
     background-color: #8B5CF6;
 }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {
+    background-color: #7C3AED;
+}
+QScrollBar::add-line, QScrollBar::sub-line {
     width: 0px;
+    height: 0px;
+    border: none;
+    background: none;
+}
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: none;
+}
+QAbstractScrollArea::corner {
+    background-color: #18181B;
 }
 
 /* ToolTip Styling */

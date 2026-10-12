@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QEvent
 from PySide6.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QFrame, QWidget, QApplication, QTableWidget, QTableWidgetItem,
@@ -578,3 +578,25 @@ class BusyButton:
                 self.button.setEnabled(True)
             except RuntimeError:  # button already deleted (table rebuilt)
                 pass
+
+
+class SmoothScrolling(QObject):
+    """
+    Application-wide: lists and tables scroll by pixels instead of jumping a whole row, and the mouse
+    wheel moves a comfortable distance. Installed once on the QApplication, so every view gets it.
+    """
+    WHEEL_STEP_PX = 24
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Polish and isinstance(obj, QAbstractItemView):
+            obj.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+            obj.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+            obj.verticalScrollBar().setSingleStep(self.WHEEL_STEP_PX)
+            obj.horizontalScrollBar().setSingleStep(self.WHEEL_STEP_PX)
+        return False
+
+
+def install_smooth_scrolling(app) -> SmoothScrolling:
+    f = SmoothScrolling(app)
+    app.installEventFilter(f)
+    return f

@@ -219,6 +219,8 @@ def run_gui(args):
 
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_THEME_QSS)
+    from app.ui.components import install_smooth_scrolling
+    install_smooth_scrolling(app)
     loop = QEventLoop(app)
     asyncio.set_event_loop(loop)
 
