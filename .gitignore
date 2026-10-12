@@ -29,3 +29,7 @@ Thumbs.db
 *.db
 *.log
 *.xlsx
+
+# Real staff list used to seed Head accounts (see deploy/seed_heads.example.json)
+data/seed_heads.json
+data/FIRST_RUN_CREDENTIALS.txt
