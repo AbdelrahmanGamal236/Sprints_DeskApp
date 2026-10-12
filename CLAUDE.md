@@ -62,4 +62,4 @@ To run several clients on one PC, give each its own `DESKAPP_DATA_DIR` (offline 
 - Match the surrounding code: type hints on new functions, short docstrings that say *why*, no emojis in UI text, Zinc/Purple colors only (`tests/test_ui_static.py` enforces both). "&" in tab or button labels must be written "&&".
 - Every server change gets a protocol-level test (`tests/helpers.py` has `start_server()`, `RawClient` and `CuttableProxy`). UI wiring is covered by the headless `tests/test_gui_smoke.py`.
 - User-facing errors come from the server message (`describe_error()`). Never show a success message before the server confirms.
-- Keep commits small, one milestone or concern each. The working branch for the stabilization work is `stabilization`.
+- Keep commits small, one milestone or concern each. Work on `main`; use a short-lived branch for large changes and merge it when approved.
