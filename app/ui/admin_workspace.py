@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QFrame, QComboBox, QTabWidget, 
     QMessageBox, QFileDialog, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QInputDialog, QSplitter, QDateEdit
+    QHeaderView, QInputDialog, QSplitter, QDateEdit, QDialog
 )
 from app.core.settings import app_settings
 from app.core.config import ROLE_HEAD, ROLE_COO, ROLE_ADMIN, ROLE_SUPER_ADMIN

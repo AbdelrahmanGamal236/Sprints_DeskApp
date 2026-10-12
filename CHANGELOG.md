@@ -4,6 +4,7 @@ Finding IDs (F-xx) refer to `AUDIT_REPORT.md`.
 
 ## Unreleased
 
+- **Fixed: three Admin buttons did nothing.** "+ Add New Task Directly", Edit on a task and Edit on a Head crashed silently because a Qt import was missing. This affected the Super Admin console too. A new test drives the Add Task dialog end to end, and a static check (pyflakes) now fails the suite on any undefined name.
 - **Daily log dates are prefilled.** When a Head selects a task, Start and End are set to the task's planned dates, which come from the Head's approved request or a later date change. If the task has no planned dates, today is used. A "Planned: X to Y" line stays under the fields. The dates remain editable, so a log still records when the work actually happened and delays show up in reports.
 
 ## M6: Hardening, backups, logging, packaging, deployment

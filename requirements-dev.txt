@@ -1,4 +1,5 @@
 -r requirements.txt
 pytest==9.1.1
+pyflakes==4.0.3
 pyinstaller==5.13.0
 pyinstaller-hooks-contrib==2023.6

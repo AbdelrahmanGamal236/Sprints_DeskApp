@@ -24,5 +24,34 @@ class TestUiRules(unittest.TestCase):
         self.assertEqual(self._scan(OFF_PALETTE), [])
 
 
+class TestNoUndefinedNames(unittest.TestCase):
+    def test_no_undefined_names(self):
+        """A missing import only fails when its button is clicked; catch it before release."""
+        try:
+            from pyflakes import api, messages, reporter
+        except ImportError:
+            self.skipTest("pyflakes not installed (pip install -r requirements-dev.txt)")
+        root = UI.parent.parent
+        found = []
+
+        class Collect(reporter.Reporter):
+            def __init__(self):
+                pass
+
+            def flake(self, msg):
+                if isinstance(msg, (messages.UndefinedName, messages.UndefinedLocal)):
+                    found.append(str(msg))
+
+            def syntaxError(self, filename, msg, lineno, offset, text):
+                found.append(f"{filename}:{lineno}: {msg}")
+
+            def unexpectedError(self, filename, msg):
+                found.append(f"{filename}: {msg}")
+
+        paths = [str(f) for f in sorted((root / "app").rglob("*.py"))] + [str(root / "main.py"), str(root / "server_main.py")]
+        api.checkRecursive(paths, Collect())
+        self.assertEqual(found, [])
+
+
 if __name__ == "__main__":
     unittest.main()
