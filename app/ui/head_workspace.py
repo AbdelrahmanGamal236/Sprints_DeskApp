@@ -2,7 +2,7 @@ from datetime import datetime
 from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QComboBox, QDateEdit, QTextEdit, QPushButton, QFrame, QSpinBox,
+    QComboBox, QDateEdit, QTextEdit, QPushButton, QFrame,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter,
     QRadioButton, QButtonGroup, QMessageBox, QDialog, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QCompleter
@@ -385,24 +385,18 @@ class HeadWorkspace(QMainWindow):
         right_vbox.setContentsMargins(0, 0, 0, 0)
         right_vbox.setSpacing(10)
 
-        # Dates Row
+        # Dates Row: the selected task's planned dates, read-only. A log never changes them; the server
+        # stamps them on the log itself. They change only through an approved Request Date Change.
         dates_row = QHBoxLayout()
-        s_box = QVBoxLayout()
-        s_box.addWidget(QLabel("Start Date:", objectName="FieldLabel"))
-        self.dt_start = QDateEdit(QDate.currentDate())
-        self.dt_start.setCalendarPopup(True)
-        s_box.addWidget(self.dt_start)
-        dates_row.addLayout(s_box)
-
-        e_box = QVBoxLayout()
-        e_box.addWidget(QLabel("End Date:", objectName="FieldLabel"))
-        self.dt_end = QDateEdit(QDate.currentDate())
-        self.dt_end.setCalendarPopup(True)
-        e_box.addWidget(self.dt_end)
-        dates_row.addLayout(e_box)
+        self.txt_task_start = self._locked_date_field()
+        self.txt_task_end = self._locked_date_field()
+        for label, field in (("Task Start Date:", self.txt_task_start), ("Task End Date:", self.txt_task_end)):
+            box = QVBoxLayout()
+            box.addWidget(QLabel(label, objectName="FieldLabel"))
+            box.addWidget(field)
+            dates_row.addLayout(box)
         right_vbox.addLayout(dates_row)
-        # Planned dates of the selected task, kept visible so a Head sees when the entry differs from the plan
-        self.lbl_planned = QLabel("")
+        self.lbl_planned = QLabel("Dates come from the task. To change them, use Request Date Change.")
         self.lbl_planned.setStyleSheet("color: #A1A1AA; font-size: 11px;")
         right_vbox.addWidget(self.lbl_planned)
 
@@ -439,17 +433,6 @@ class HeadWorkspace(QMainWindow):
         box_st.addWidget(self.cmb_progress)
         row_status_assign.addLayout(box_st)
 
-        box_pct = QVBoxLayout()
-        box_pct.addWidget(QLabel("Progress %:", objectName="FieldLabel"))
-        self.spn_percentage = QSpinBox()
-        self.spn_percentage.setRange(0, 100)
-        self.spn_percentage.setSuffix(" %")
-        self.spn_percentage.setSingleStep(5)
-        self.spn_percentage.setMinimumWidth(110)
-        box_pct.addWidget(self.spn_percentage)
-        row_status_assign.addLayout(box_pct)
-        self.cmb_progress.currentTextChanged.connect(
-            lambda st: self.spn_percentage.setValue(100) if st == "Done" else None)
 
         box_as = QVBoxLayout()
         box_as.addWidget(QLabel("Assigned To (Team Member Name):", objectName="FieldLabel"))
@@ -601,26 +584,24 @@ class HeadWorkspace(QMainWindow):
                                  lambda r: self.proj_timeline_widget.load_timeline_data(r.get("data", {})),
                                  self.on_request_error)
 
+    def _locked_date_field(self) -> QLineEdit:
+        field = QLineEdit()
+        field.setReadOnly(True)
+        field.setFocusPolicy(Qt.NoFocus)
+        field.setPlaceholderText("Select a task")
+        field.setStyleSheet("color: #A1A1AA; background-color: #18181B;")
+        return field
+
     def on_task_selected(self):
-        """Prefill the entry dates with the task's planned dates (from the approved request or a later
-        date change). They stay editable: a log records when the work really happened, which may differ."""
+        """Show the selected task's planned dates (from the approved request or a later date change)."""
         items = self.lst_tasks.selectedItems()
         if not items:
-            self.lbl_planned.setText("")
+            self.txt_task_start.clear()
+            self.txt_task_end.clear()
             return
         t = items[0].data(Qt.UserRole + 2) or {}
-        p_start = QDate.fromString(t.get("planned_start_date") or "", "yyyy-MM-dd")
-        p_end = QDate.fromString(t.get("planned_end_date") or "", "yyyy-MM-dd")
-        today = QDate.currentDate()
-        start = p_start if p_start.isValid() else today
-        end = p_end if p_end.isValid() and p_end >= start else start
-        self.dt_start.setDate(start)
-        self.dt_end.setDate(end)
-        if p_start.isValid() or p_end.isValid():
-            self.lbl_planned.setText(f"Planned: {t.get('planned_start_date') or 'TBD'} to "
-                                     f"{t.get('planned_end_date') or 'TBD'}")
-        else:
-            self.lbl_planned.setText("Planned: no dates set for this task")
+        self.txt_task_start.setText(t.get("planned_start_date") or "Not set")
+        self.txt_task_end.setText(t.get("planned_end_date") or "Not set")
 
     def update_revision_tag_display(self):
         if self.rb_revision.isChecked():
@@ -651,11 +632,6 @@ class HeadWorkspace(QMainWindow):
         notes = self.txt_notes.toPlainText().strip()
         assigned_to = self.txt_assigned_to.text().strip()
 
-        if self.dt_start.date() > self.dt_end.date():
-            self.toast.show_message("Start date cannot be after end date.", is_warning=True)
-            return
-        start_str = self.dt_start.date().toString("yyyy-MM-dd")
-        end_str = self.dt_end.date().toString("yyyy-MM-dd")
         stage = self.cmb_progress.currentText()
 
         if self.rb_revision.isChecked():
@@ -673,9 +649,6 @@ class HeadWorkspace(QMainWindow):
         log_payload = {
             "project_id": project_id,
             "task_id": task_id,
-            "start_date": start_str,
-            "end_date": end_str,
-            "progress_percentage": self.spn_percentage.value(),
             "progress_stage": stage,
             "entry_type": entry_type,
             "revision_number": rev_num,

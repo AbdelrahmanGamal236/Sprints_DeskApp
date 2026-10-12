@@ -353,7 +353,7 @@ class CentralWebSocketServer:
     # ---------------- progress logs ----------------
     @action("SUBMIT_LOG", roles=(ROLE_HEAD,))
     async def a_submit_log(self, ws, session, payload, msg_id):
-        _require(payload, "log_id", "project_id", "task_id", "start_date", "end_date", "progress_stage")
+        _require(payload, "log_id", "project_id", "task_id", "progress_stage")
         data = dict(payload)
         data["employee_id"] = session.user_id  # never trust identity from the payload
         saved = await self.db_call(self.db.submit_progress_log, data)

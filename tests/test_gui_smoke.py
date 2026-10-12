@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import unittest
 
-from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QApplication
 
 from tests.helpers import start_server, wait_until, PASSWORD
@@ -85,19 +84,18 @@ class TestGuiSmoke(unittest.TestCase):
                 self.assertTrue(await wait_until(lambda: ws.cmb_projects.count() == 3))
                 self.assertTrue(await wait_until(lambda: ws.lst_tasks.count() == 1))
                 ws.lst_tasks.setCurrentRow(0)
-                # Entry dates are prefilled from the task's planned dates and stay editable
-                self.assertEqual(ws.dt_start.date().toString("yyyy-MM-dd"), "2026-03-02")
-                self.assertEqual(ws.dt_end.date().toString("yyyy-MM-dd"), "2026-03-20")
-                self.assertIn("2026-03-02 to 2026-03-20", ws.lbl_planned.text())
-                ws.dt_end.setDate(QDate(2026, 3, 25))
+                # The task's planned dates are shown locked; there is no Progress % field
+                self.assertEqual((ws.txt_task_start.text(), ws.txt_task_end.text()), ("2026-03-02", "2026-03-20"))
+                self.assertTrue(ws.txt_task_start.isReadOnly() and ws.txt_task_end.isReadOnly())
+                self.assertFalse(hasattr(ws, "spn_percentage"))
+                ws.cmb_progress.setCurrentText("In Progress")
                 ws.txt_notes.setPlainText("Smoke test log")
-                ws.spn_percentage.setValue(40)
                 ws.on_submit_log()
                 self.assertTrue(await wait_until(
                     lambda: any(l["notes"] == "Smoke test log" for l in server.db.get_progress_logs())))
                 stored = next(l for l in server.db.get_progress_logs() if l["notes"] == "Smoke test log")
-                self.assertEqual(stored["progress_percentage"], 40)
-                self.assertEqual((stored["start_date"], stored["end_date"]), ("2026-03-02", "2026-03-25"))
+                self.assertEqual((stored["start_date"], stored["end_date"]), ("2026-03-02", "2026-03-20"))
+                self.assertEqual(stored["progress_stage"], "In Progress")
                 self.assertTrue(await wait_until(lambda: "saved on the Central Server" in ws.toast.label.text()))
                 overlay = ws.toast._overlay()
                 self.assertTrue(overlay.isVisible())

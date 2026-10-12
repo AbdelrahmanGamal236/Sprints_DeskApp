@@ -60,8 +60,10 @@ A. data/central_app.db (server only). Schema version in PRAGMA user_version.
                      proposed_by_id, is_hidden, is_deleted, deleted_at,
                      deleted_by
   progress_logs      log_id PK (client UUID), employee_id, project_id,
-                     task_id, start_date, end_date, progress_percentage
-                     (0-100), progress_stage (In Progress|Revision|Hold|Done),
+                     task_id, start_date, end_date (the task's planned dates
+                     at submission, set by the server), progress_percentage
+                     (derived: 100 when Done, else 0; older logs keep the
+                     value entered then), progress_stage (In Progress|Revision|Hold|Done),
                      entry_type (NEW|CONTINUATION|REVISION), revision_number
                      (server-assigned per task), notes, discipline_id (Head's),
                      assigned_to (free text), submitted_at (local time)
@@ -122,17 +124,20 @@ B. data/client_queue.db (each workstation)
   - Project selector on top; the discipline tab lists only the Head's
     discipline tasks for that project (server-filtered; pinned tasks only for
     their Head).
-  - Selecting a task prefills start/end date with the task's planned dates
-    (from the approved request or a later date change; today if none) and
-    shows "Planned: X to Y". The dates stay editable so a log records when
-    the work really happened.
-  - Form: start/end date, entry type (New/Continuation/Revision; the R-number
-    preview comes from the server, the final number is assigned on save),
-    progress stage and %, Assigned To, notes -> Submit.
+  - Selecting a task shows its planned start/end dates (from the approved
+    request or a later date change) in read-only fields. Logging never
+    changes them; only an approved Request Date Change does.
+  - Form: entry type (New/Continuation/Revision; the R-number preview comes
+    from the server, the final number is assigned on save), progress stage,
+    Assigned To, notes -> Submit. There is no progress percentage.
+  - The server stamps the log with the task's current planned dates and the
+    submission date/time; dates sent by a client are ignored, so a log
+    queued offline still gets the right dates. Earlier logs keep the dates
+    that applied when they were submitted.
   - SyncService writes the log to client_queue.db, sends SUBMIT_LOG, and
     deletes it only after the server confirms. Toast: "saved on the Central
     Server (R2)", "queued offline", or "rejected: reason".
-  - Server validates everything (dates, stage, %, lengths, task belongs to the
+  - Server validates everything (stage, entry type, lengths, task belongs to the
     project and the Head's discipline, task active) and stores the row
     idempotently by log_id.
 
@@ -177,8 +182,11 @@ B. data/client_queue.db (each workstation)
 
 4.10 Excel export (server-side)
   EXPORT_EXCEL_REQUEST {project_id, discipline_id, employee_id, start_date,
-  end_date}. The date range uses overlap: a log counts if its start-end period
-  touches the range. Workbook: "All Logs", one sheet per discipline (when not
+  end_date}. The date range is on the submission day: a log counts if it was
+  submitted from the From date to the To date (both inclusive). Columns:
+  Submitted Date, Submitted Time, Head ID/Name/Discipline, Project, Task ID,
+  Task, Discipline, Task Start/End Date, Status, Entry Type, Revision Tag,
+  Assigned To, Notes, Log ID; newest first. Workbook: "All Logs", one sheet per discipline (when not
   filtered to one), "Report Info" (filters, rule, row count, generated
   at/by). Hidden/deleted projects, tasks and disciplines are labelled and shown
   in grey. Built on its own thread and sent in chunks.

@@ -407,7 +407,7 @@ class TestRobustness(unittest.TestCase):
                 r = await c.wait_for(lambda d: d.get("msg_id") == "m1")
                 self.assertEqual(r["code"], P.ERR_BAD_REQUEST)
                 h = await raw_login(server.port, "h_urb")
-                r = await h.req("SUBMIT_LOG", log_payload(progress_percentage="abc"))
+                r = await h.req("SUBMIT_LOG", log_payload(progress_stage="Almost"))
                 self.assertFalse(r["ok"])
                 r = await h.req("SUBMIT_LOG", log_payload(task_id=None))
                 self.assertEqual(r["code"], P.ERR_VALIDATION)

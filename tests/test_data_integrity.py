@@ -187,12 +187,8 @@ class TestSoftDelete(IntegrityBase):
 class TestValidation(IntegrityBase):
     def test_log_validation(self):
         bad = [
-            {"start_date": "02/10/2026"},
-            {"start_date": "2026-10-05", "end_date": "2026-10-01"},
             {"progress_stage": "Almost"},
             {"entry_type": "OTHER"},
-            {"progress_percentage": 101},
-            {"progress_percentage": "abc"},
             {"notes": "x" * 5001},
             {"assigned_to": "y" * 101},
             {"task_id": "T2"},          # task belongs to P2
@@ -203,8 +199,25 @@ class TestValidation(IntegrityBase):
                 self.log(**extra)
         with self.assertRaises(PermissionError):
             self.log(employee="h3")     # STR head on URB task
-        ok = self.log(progress_percentage=55, notes="fine", assigned_to="Eng. X")
-        self.assertEqual(ok["progress_percentage"], 55)
+        ok = self.log(notes="fine", assigned_to="Eng. X")
+        self.assertEqual((ok["notes"], ok["assigned_to"]), ("fine", "Eng. X"))
+
+    def test_log_takes_task_dates_and_stage_progress(self):
+        """Dates and % sent by a client are ignored: the log carries the task's planned period."""
+        lg = self.log(start_date="2020-01-01", end_date="2030-12-31", progress_percentage=55)
+        self.assertEqual((lg["start_date"], lg["end_date"]), ("2026-10-01", "2026-10-10"))
+        self.assertEqual(lg["progress_percentage"], 0)
+        done = self.log(progress_stage="Done")  # old clients that still send no dates are accepted too
+        self.assertEqual(done["progress_percentage"], 100)
+        # An approved date change applies to later logs only; earlier logs keep their dates
+        self.db.update_task("T1", planned_end_date="2026-10-20")
+        later = self.log()
+        self.assertEqual(later["end_date"], "2026-10-20")
+        stored = {l["log_id"]: l for l in self.db.get_progress_logs()}
+        self.assertEqual(stored[lg["log_id"]]["end_date"], "2026-10-10")
+        # The task's own dates are never changed by logging
+        task = next(t for t in self.db.get_tasks() if t["task_id"] == "T1")
+        self.assertEqual((task["planned_start_date"], task["planned_end_date"]), ("2026-10-01", "2026-10-20"))
 
     def test_timestamps_are_local(self):
         lg = self.log()

@@ -5,7 +5,10 @@ Finding IDs (F-xx) refer to `AUDIT_REPORT.md`.
 ## Unreleased
 
 - **Fixed: three Admin buttons did nothing.** "+ Add New Task Directly", Edit on a task and Edit on a Head crashed silently because a Qt import was missing. This affected the Super Admin console too. A new test drives the Add Task dialog end to end, and a static check (pyflakes) now fails the suite on any undefined name.
-- **Daily log dates are prefilled.** When a Head selects a task, Start and End are set to the task's planned dates, which come from the Head's approved request or a later date change. If the task has no planned dates, today is used. A "Planned: X to Y" line stays under the fields. The dates remain editable, so a log still records when the work actually happened and delays show up in reports.
+- **Daily log dates are locked to the task.** When a Head selects a task, its planned Start and End dates are shown read-only. These come from the Head's approved request, or from a later approved date change. Logging never changes the task's dates. The server stamps each log with the task's current dates and ignores dates sent by a PC, so logs queued offline are correct too. Earlier logs keep the dates that applied when they were submitted.
+- **Progress % removed.** Heads report only the stage. On the project timeline a task counts as 100% when its latest stage is Done, otherwise 0%, and the project's overall % is the average. Older logs keep their stored % in the database.
+- **Excel export rebuilt for daily status reporting.** Each row starts with Submitted Date and Submitted Time, followed by the Head, project, task, the task's start and end dates, Status, Entry Type, Revision Tag, Assigned To and Notes. Log ID is now the last column, and the Progress % column is gone.
+- **The export date filter now uses the submission day.** "From / To" selects logs submitted on those days, both ends inclusive. It no longer filters on overlapping work periods.
 
 ## M6: Hardening, backups, logging, packaging, deployment
 

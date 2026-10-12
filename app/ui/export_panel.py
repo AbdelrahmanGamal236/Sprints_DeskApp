@@ -47,7 +47,7 @@ class ExportPanel(QWidget):
         c_layout.addLayout(row)
 
         dates = QHBoxLayout()
-        self.chk_dates = QCheckBox("Only logs whose work period overlaps:", self)
+        self.chk_dates = QCheckBox("Only logs submitted between:", self)
         dates.addWidget(self.chk_dates)
         dates.addWidget(QLabel("From", self))
         self.dt_from = QDateEdit(QDate.currentDate().addMonths(-1), self)

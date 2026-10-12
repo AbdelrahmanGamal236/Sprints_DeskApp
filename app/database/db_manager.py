@@ -1407,21 +1407,14 @@ class DBManager:
         employee_id = payload.get("employee_id")
         project_id = clean_text(payload.get("project_id"), "Project", 50, required=True)
         task_id = clean_text(payload.get("task_id"), "Task", 50, required=True)
-        start_date = parse_date(payload.get("start_date"), "Start date")
-        end_date = parse_date(payload.get("end_date"), "End date")
-        check_date_order(start_date, end_date)
         progress_stage = clean_text(payload.get("progress_stage"), "Progress stage", 50, required=True)
         if progress_stage not in PROGRESS_STAGES:
             raise ValueError(f"Progress stage must be one of: {', '.join(PROGRESS_STAGES)}.")
         entry_type = (payload.get("entry_type") or ENTRY_TYPE_NEW).upper()
         if entry_type not in ENTRY_TYPES:
             raise ValueError(f"Entry type must be one of: {', '.join(ENTRY_TYPES)}.")
-        try:
-            progress_percentage = int(payload.get("progress_percentage") or 0)
-        except (TypeError, ValueError):
-            raise ValueError("Progress percentage must be a whole number between 0 and 100.")
-        if not 0 <= progress_percentage <= 100:
-            raise ValueError("Progress percentage must be between 0 and 100.")
+        # Progress is tracked by stage only; the column is kept for old logs and filled from the stage
+        progress_percentage = 100 if progress_stage == "Done" else 0
         notes = clean_text(payload.get("notes"), "Notes", MAX_NOTES_LEN)
         assigned_to = clean_text(payload.get("assigned_to"), "Assigned To", MAX_ASSIGNED_TO_LEN)
 
@@ -1453,10 +1446,14 @@ class DBManager:
                 if task["assigned_head_id"] and task["assigned_head_id"] != employee_id:
                     raise PermissionError(f"Task '{task_id}' is specifically assigned to Head '{task['assigned_head_id']}'.")
 
+            # A log carries the task's planned dates as they are at submission time; dates sent by the
+            # client are ignored, so the period cannot be edited and a queued offline log stays correct.
+            submitted_at = now_local()
+            start_date = task["planned_start_date"] or submitted_at[:10]
+            end_date = task["planned_end_date"] or start_date
             log_discipline = emp["discipline_id"] or task["discipline_id"]
             # Revision number assigned here, inside the write transaction, never taken from the client
             revision_number = self._next_revision(cur, task_id) if entry_type == ENTRY_TYPE_REVISION else 0
-            submitted_at = now_local()
             cur.execute("""
             INSERT INTO progress_logs (
                 log_id, employee_id, project_id, task_id, start_date, end_date,
@@ -1509,14 +1506,14 @@ class DBManager:
             if employee_id:
                 query += " AND l.employee_id = ?"
                 params.append(employee_id)
-            # Date range uses overlap semantics: a log is included when its work period
-            # [start_date, end_date] touches the requested period at all.
+            # Date range filters on when the log was submitted (inclusive days). Every log of a task
+            # carries the task's planned period, so filtering on that would not tell the days apart.
             if start_date:
-                query += " AND l.end_date >= ?"
+                query += " AND l.submitted_at >= ?"
                 params.append(start_date)
             if end_date:
-                query += " AND l.start_date <= ?"
-                params.append(end_date)
+                query += " AND l.submitted_at < ?"
+                params.append((datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d"))
 
             query += " ORDER BY l.submitted_at DESC, l.rowid DESC"
             if limit:
@@ -1696,10 +1693,8 @@ class DBManager:
         task_timeline = []
         for t in tasks:
             last = latest.get(t["task_id"])
-            cur_pct = (last["progress_percentage"] or 0) if last else 0
             cur_stage = last["progress_stage"] if last else "Not Started"
-            if cur_stage == "Done":
-                cur_pct = 100
+            cur_pct = 100 if cur_stage == "Done" else 0  # progress follows the stage only
             if cur_stage in counters:
                 counters[cur_stage] += 1
             total_progress_sum += cur_pct
