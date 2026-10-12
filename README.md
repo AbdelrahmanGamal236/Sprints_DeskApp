@@ -10,6 +10,7 @@ An internal desktop app for an engineering company's offline local network. Depa
 
 | File | For |
 |---|---|
+| [INSTALL_GUIDE.txt](INSTALL_GUIDE.txt) | Anyone: short plain-text guide to which PC gets what and how the server IP works |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | IT: installing the server and clients, firewall, first login, backups and restore, troubleshooting |
 | [APPLICATION_WORKFLOW_SUMMARY.txt](APPLICATION_WORKFLOW_SUMMARY.txt) | How every workflow works, the server actions and permissions, and a directory of modules and functions |
 | [CLAUDE.md](CLAUDE.md) | Developers: architecture, rules, commands |
@@ -30,7 +31,7 @@ python -m PyInstaller DeskApp.spec --noconfirm   # builds dist/DeskApp/
 The build folder `dist/DeskApp/` contains:
 - `DeskApp.exe`: the client
 - `DeskAppServer.exe`: the server, with a console window
-- both launch scripts, `DEPLOYMENT.md`, and `seed_heads.example.json`
+- both launch scripts, `INSTALL_GUIDE.txt`, `DEPLOYMENT.md`, and `seed_heads.example.json`
 
 Copy that whole folder to each PC.
 

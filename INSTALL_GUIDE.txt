@@ -1,0 +1,172 @@
+=====================================================================
+ DeskApp - Quick Installation Guide
+ Which PC gets what, and how the IP address works
+=====================================================================
+
+For full details (backups, restore, auto start, troubleshooting) see
+DEPLOYMENT.md in the same folder.
+
+
+---------------------------------------------------------------------
+ 1. HOW IT WORKS (THE BIG PICTURE)
+---------------------------------------------------------------------
+
+   ONE Central Server PC                 Every Head / Admin / COO PC
+   +-----------------------+             +-----------------------+
+   |  DeskAppServer.exe    |  <== LAN => |  DeskApp.exe          |
+   |  keeps the database   |   port 8765 |  the program people   |
+   |  (data\central_app.db)|             |  use every day        |
+   +-----------------------+             +-----------------------+
+
+ - The SERVER PC holds all the data. It must be switched on whenever
+   anyone uses DeskApp.
+ - Every other PC runs the CLIENT (DeskApp.exe). It connects to the
+   server using the server's IP address, for example 192.168.1.50.
+ - No internet is needed. All PCs only need to be on the same office
+   network (LAN). No PC needs Python.
+ - If the network drops, Heads can keep logging. Their entries are kept
+   on their PC and sent automatically when the connection returns.
+
+
+---------------------------------------------------------------------
+ 2. WHICH FOLDER DO I COPY?
+---------------------------------------------------------------------
+
+ You need the READY-TO-RUN folder named "DeskApp" that contains:
+
+     DeskApp.exe                 <- the client (for everyone)
+     DeskAppServer.exe           <- the server (server PC only)
+     Launch_DeskApp.bat          <- starts the client
+     Launch_Server_Daemon.bat    <- starts the server
+     INSTALL_GUIDE.txt, DEPLOYMENT.md, seed_heads.example.json
+     PySide6 folder and many .dll / .pyd files (keep them all)
+
+ The SAME folder is used on every PC. What differs is only which
+ program you start.
+
+ If you have the PROJECT SOURCE folder instead (it contains main.py,
+ the "app" and "tests" folders and DeskApp.spec), you must build the
+ ready-to-run folder first, ONCE, on a developer PC that has Python
+ 3.10 and internet:
+
+     pip install -r requirements-dev.txt
+     python -m PyInstaller DeskApp.spec --noconfirm
+
+ The result is the folder  dist\DeskApp\  -> that is the folder you
+ copy to the PCs. Do NOT copy the source folder to office PCs.
+
+
+---------------------------------------------------------------------
+ 3. THE SERVER PC (only one)
+---------------------------------------------------------------------
+
+ 1. Pick a PC that stays on during working hours. Turn off sleep:
+    Settings > System > Power > Sleep: Never.
+
+ 2. Copy the whole DeskApp folder to  C:\DeskApp
+    (not under C:\Program Files).
+
+ 3. (Optional, first start only) To create the Head accounts
+    automatically: make a folder  C:\DeskApp\data , copy
+    seed_heads.example.json into it, rename it to  seed_heads.json
+    and edit the names, IDs and discipline codes with Notepad.
+
+ 4. Double-click  Launch_Server_Daemon.bat
+    A black window opens. On the very first start it shows:
+        User ID: superadmin    Temporary password: ..........
+    WRITE THIS PASSWORD DOWN. A copy is saved in
+    C:\DeskApp\data\FIRST_RUN_CREDENTIALS.txt (delete that file after
+    the Super Admin has logged in and changed the password).
+    Keep the black window open (minimize it). Closing it stops the
+    server for everyone.
+
+ 5. Allow the port through the firewall. Open Command Prompt as
+    Administrator and paste this one line:
+
+    netsh advfirewall firewall add rule name="DeskApp Central Server" dir=in action=allow protocol=TCP localport=8765 profile=domain,private
+
+    If Windows asks whether to allow DeskAppServer on networks, allow
+    "Private networks".
+
+ 6. Find the server's IP address:
+    Win + R > type cmd > Enter > type  ipconfig  > Enter.
+    Look for "IPv4 Address", for example 192.168.1.50.
+    Give this address to everyone.
+    Ask the network admin to make this address FIXED (reserved), so it
+    never changes.
+
+ The server PC can also run DeskApp.exe if someone works on it; in the
+ login window use the IP 127.0.0.1 (meaning "this PC").
+
+
+---------------------------------------------------------------------
+ 4. HEAD / ADMIN / COO PCs (all the others)
+---------------------------------------------------------------------
+
+ 1. Copy the same whole DeskApp folder to  C:\DeskApp
+
+ 2. Right-click DeskApp.exe > Send to > Desktop (create shortcut).
+
+ 3. Start it. In the login window enter:
+      User Name / ID : the person's ID (the Head's fingerprint ID)
+      Password       : first time = the same as the ID
+      Central Server LAN IP : the server's IP from step 3.6,
+                              for example 192.168.1.50
+    The IP is remembered, so it is typed only once per PC.
+
+ 4. On first login DeskApp asks for a new password (at least 8
+    characters, not the same as the ID).
+
+ Do NOT start DeskAppServer.exe or Launch_Server_Daemon.bat on these
+ PCs. There must be only ONE server.
+ These PCs need no firewall rule.
+
+
+---------------------------------------------------------------------
+ 5. ORDER OF THE FIRST DAY
+---------------------------------------------------------------------
+
+ 1. Server PC: start the server, write down the superadmin password.
+ 2. Super Admin logs in (from any PC), sets a new password and creates
+    the Admin and COO accounts. Their first password is their ID.
+ 3. Admin creates the projects and tasks (and any Heads that were not
+    in seed_heads.json).
+ 4. Heads log in and start logging their daily progress.
+
+ Forgotten password: the Admin (for Heads) or the Super Admin (for
+ anyone) clicks "Reset Pass". The password becomes the user's ID
+ again and the user must choose a new one at the next login.
+
+
+---------------------------------------------------------------------
+ 6. IF A PC CANNOT CONNECT
+---------------------------------------------------------------------
+
+ - Is the black server window open on the server PC?
+ - Is the IP right? Run ipconfig on the server again; it may have
+   changed. Type the new IP in the login window.
+ - Is the firewall rule there (step 3.5)?
+ - Test from the client PC in PowerShell (use the real server IP):
+       Test-NetConnection 192.168.1.50 -Port 8765
+   "TcpTestSucceeded : True" means the network is fine.
+ - "Version does not match": copy the same new DeskApp folder to the
+   server and to every PC. All PCs must use the same version.
+
+
+---------------------------------------------------------------------
+ 7. UPDATING TO A NEW VERSION
+---------------------------------------------------------------------
+
+ 1. Close DeskApp on all PCs and close the server window.
+ 2. Replace the program files in C:\DeskApp with the new DeskApp
+    folder on every PC (server and clients).
+    KEEP the "data" folder: on the server it holds the database and
+    backups; on the clients it holds unsent entries.
+ 3. Start the server again, then the clients.
+
+ Backups of the database are made automatically every day in
+ C:\DeskApp\data\backups (on the server PC).
+
+=====================================================================
+ All Rights Reserved to Eng. Abdelrahman Gamal & Eng. Tolimy
+=====================================================================

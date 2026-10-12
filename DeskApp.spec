@@ -14,6 +14,7 @@ EXCLUDES = ['numpy', 'pandas', 'PIL', 'matplotlib', 'scipy', 'tkinter', 'IPython
 DATAS = [
     ('deploy/seed_heads.example.json', '.'),
     ('DEPLOYMENT.md', '.'),
+    ('INSTALL_GUIDE.txt', '.'),
     ('Launch_DeskApp.bat', '.'),
     ('Launch_Server_Daemon.bat', '.'),
 ]
