@@ -359,6 +359,9 @@ class CentralWebSocketServer:
         data["employee_id"] = session.user_id  # never trust identity from the payload
         saved = await self.db_call(self.db.submit_progress_log, data)
         await self.broadcast({"type": "NEW_LOG_EVENT", "log": saved}, target_roles=OVERSIGHT)
+        if saved.get("first_entry"):
+            # The task's New Task entry is now used: Heads' forms switch to Continuation / Revision
+            await self.notify_changed("tasks", roles=(ROLE_HEAD,))
         return {"id": saved["log_id"], "log": saved}
 
     @action("CALCULATE_NEXT_REVISION", roles=(ROLE_HEAD,), response_type="NEXT_REVISION_RESPONSE")

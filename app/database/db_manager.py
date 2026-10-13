@@ -1051,7 +1051,8 @@ class DBManager:
             query = """
             SELECT t.*, p.name AS project_name, p.is_hidden AS project_hidden, u.full_name AS proposer_name,
                    d.name AS discipline_name,
-                   uh.full_name AS assigned_head_name
+                   uh.full_name AS assigned_head_name,
+                   (SELECT COUNT(*) FROM progress_logs l WHERE l.task_id = t.task_id) AS log_count
             FROM tasks t
             LEFT JOIN projects p ON t.project_id = p.project_id
             LEFT JOIN users u ON t.proposed_by_id = u.user_id
@@ -1446,8 +1447,8 @@ class DBManager:
         progress_stage = clean_text(payload.get("progress_stage"), "Progress stage", 50, required=True)
         if progress_stage not in PROGRESS_STAGES:
             raise ValueError(f"Progress stage must be one of: {', '.join(PROGRESS_STAGES)}.")
-        entry_type = (payload.get("entry_type") or ENTRY_TYPE_NEW).upper()
-        if entry_type not in ENTRY_TYPES:
+        entry_type = (payload.get("entry_type") or "").upper()  # empty: chosen below from the task's history
+        if entry_type and entry_type not in ENTRY_TYPES:
             raise ValueError(f"Entry type must be one of: {', '.join(ENTRY_TYPES)}.")
         # Progress is tracked by stage only; the column is kept for old logs and filled from the stage
         progress_percentage = 100 if progress_stage == "Done" else 0
@@ -1487,6 +1488,17 @@ class DBManager:
             submitted_at = now_local()
             start_date = task["planned_start_date"] or submitted_at[:10]
             end_date = task["planned_end_date"] or start_date
+            # "New Task" is the first entry of a task and only that; every later entry is a
+            # Continuation or a Revision (shared by all Heads of the task).
+            cur.execute("SELECT COUNT(*) AS n FROM progress_logs WHERE task_id = ?", (task_id,))
+            first_entry = cur.fetchone()["n"] == 0
+            if not entry_type:
+                entry_type = ENTRY_TYPE_NEW if first_entry else ENTRY_TYPE_CONTINUATION
+            if entry_type == ENTRY_TYPE_NEW and not first_entry:
+                raise ValueError(f"Task '{task_id}' already has its New Task entry. "
+                                 f"Choose Continuation or Revision.")
+            if entry_type != ENTRY_TYPE_NEW and first_entry:
+                raise ValueError(f"The first entry for task '{task_id}' must be New Task.")
             log_discipline = emp["discipline_id"] or task["discipline_id"]
             # Revision number assigned here, inside the write transaction, never taken from the client
             revision_number = self._next_revision(cur, task_id) if entry_type == ENTRY_TYPE_REVISION else 0
@@ -1507,7 +1519,7 @@ class DBManager:
             "progress_percentage": progress_percentage, "progress_stage": progress_stage,
             "entry_type": entry_type, "revision_number": revision_number,
             "notes": notes, "discipline_id": log_discipline, "assigned_to": assigned_to,
-            "submitted_at": submitted_at
+            "submitted_at": submitted_at, "first_entry": first_entry
         }
 
     def get_progress_logs(self, project_id: str = None, discipline_id: str = None,

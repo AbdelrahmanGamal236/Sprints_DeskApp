@@ -421,6 +421,10 @@ class HeadWorkspace(QMainWindow):
         rb_layout.addWidget(self.lbl_rev_tag)
         rb_layout.addStretch()
         right_vbox.addLayout(rb_layout)
+        self.lbl_entry_hint = QLabel("")
+        self.lbl_entry_hint.setStyleSheet("color: #A1A1AA; font-size: 11px;")
+        right_vbox.addWidget(self.lbl_entry_hint)
+        self.apply_entry_type_rules(None)
         self.rb_group.buttonToggled.connect(self.update_revision_tag_display)
 
         # Status & Assigned To Row (A5)
@@ -598,10 +602,45 @@ class HeadWorkspace(QMainWindow):
         if not items:
             self.txt_task_start.clear()
             self.txt_task_end.clear()
+            self.apply_entry_type_rules(None)
             return
         t = items[0].data(Qt.UserRole + 2) or {}
         self.txt_task_start.setText(t.get("planned_start_date") or "Not set")
         self.txt_task_end.setText(t.get("planned_end_date") or "Not set")
+        self.apply_entry_type_rules(t)
+
+    def apply_entry_type_rules(self, task: dict | None):
+        """New Task only for a task's first entry; afterwards only Continuation or Revision (server enforces it)."""
+        if task is None:
+            for rb in (self.rb_new, self.rb_continuation, self.rb_revision):
+                rb.setEnabled(False)
+            self.lbl_entry_hint.setText("Select a task first.")
+            return
+        has_entries = (task.get("log_count") or 0) > 0
+        self.rb_new.setEnabled(not has_entries)
+        self.rb_continuation.setEnabled(has_entries)
+        self.rb_revision.setEnabled(has_entries)
+        if has_entries and self.rb_new.isChecked():
+            self.rb_continuation.setChecked(True)
+        elif not has_entries:
+            self.rb_new.setChecked(True)
+        self.lbl_entry_hint.setText(
+            "New Task was already submitted for this task. Choose Continuation or Revision." if has_entries
+            else "First entry for this task: New Task. Later entries are Continuation or Revision.")
+
+    def _mark_task_has_entry(self, task_id: str):
+        """Lock New Task right after submitting, even before the server answers (or while offline)."""
+        for t in self.tasks_data:
+            if t.get("task_id") == task_id:
+                t["log_count"] = (t.get("log_count") or 0) + 1
+        for i in range(self.lst_tasks.count()):
+            item = self.lst_tasks.item(i)
+            if item.data(Qt.UserRole) == task_id:
+                data = item.data(Qt.UserRole + 2) or {}
+                data["log_count"] = (data.get("log_count") or 0) + 1
+                item.setData(Qt.UserRole + 2, data)
+                if item.isSelected():
+                    self.apply_entry_type_rules(data)
 
     def update_revision_tag_display(self):
         if self.rb_revision.isChecked():
@@ -658,6 +697,7 @@ class HeadWorkspace(QMainWindow):
         }
 
         item_id = self.sync_service.submit_progress_log(log_payload)
+        self._mark_task_has_entry(task_id)
         # Guard against accidental double submission
         self.btn_submit.setEnabled(False)
         QTimer.singleShot(1500, lambda: self.btn_submit.setEnabled(True))
@@ -696,6 +736,7 @@ class HeadWorkspace(QMainWindow):
         label = FailedSubmissionsDialog.ACTION_LABELS.get(action, "Item")
         self.toast.show_message(f"{label} was rejected by the Central Server: {error}", is_error=True, duration_ms=9000)
         self.update_sync_badge()
+        self.request_refresh_from_server()  # resync task state (e.g. which entry types are allowed)
 
     def on_open_failed_items(self):
         FailedSubmissionsDialog(self.sync_service, self).exec()

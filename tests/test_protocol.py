@@ -205,6 +205,28 @@ class TestIdentityAndScope(unittest.TestCase):
                 await server.stop()
         run(scenario())
 
+    def test_first_entry_locks_new_task_for_all_heads(self):
+        async def scenario():
+            server = await start_server()
+            try:
+                h1 = await raw_login(server.port, "h_urb")
+                h2 = await raw_login(server.port, "h_urb2")
+                snap = await h2.req("GET_SNAPSHOT", {})
+                self.assertEqual(next(t for t in snap["tasks"] if t["task_id"] == "T-URB")["log_count"], 0)
+                r = await h1.req("SUBMIT_LOG", log_payload(entry_type="NEW"))
+                self.assertTrue(r["ok"], r)
+                # The other Head of the discipline is told to reload its tasks
+                await h2.wait_for(lambda d: d.get("type") == "DATA_CHANGED" and "tasks" in d.get("scopes", []))
+                snap = await h2.req("GET_SNAPSHOT", {})
+                self.assertEqual(next(t for t in snap["tasks"] if t["task_id"] == "T-URB")["log_count"], 1)
+                r = await h2.req("SUBMIT_LOG", log_payload(entry_type="NEW"))
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+                r = await h2.req("SUBMIT_LOG", log_payload(entry_type="CONTINUATION"))
+                self.assertTrue(r["ok"], r)
+            finally:
+                await server.stop()
+        run(scenario())
+
     def test_head_cannot_log_or_request_outside_discipline(self):
         async def scenario():
             server = await start_server()

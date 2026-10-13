@@ -130,6 +130,11 @@ B. data/client_queue.db (each workstation)
   - Selecting a task shows its planned start/end dates (from the approved
     request or a later date change) in read-only fields. Logging never
     changes them; only an approved Request Date Change does.
+  - Entry type rule (server-enforced, per task, shared by all its Heads):
+    the first entry is New Task and only that; once it exists, New Task is
+    locked and only Continuation or Revision can be chosen. The task list
+    carries log_count; the first entry triggers DATA_CHANGED "tasks" to Heads
+    so every form updates. No entry type sent = New first, then Continuation.
   - Form: entry type (New/Continuation/Revision; the R-number preview comes
     from the server, the final number is assigned on save), progress stage,
     Assigned To, notes -> Submit. There is no progress percentage.

@@ -49,6 +49,12 @@ class TestSqliteConfiguration(IntegrityBase):
 
 
 class TestRevisionCounter(IntegrityBase):
+    def setUp(self):
+        super().setUp()
+        # Each task's first entry is its New Task entry; revisions come after it
+        self.log(entry_type="NEW")
+        self.log(task="T2", project="P2", entry_type="NEW")
+
     def test_server_assigns_revision_per_task(self):
         r1 = self.log(entry_type="REVISION", revision_number=1)
         r2 = self.log(employee="h2", entry_type="REVISION", revision_number=1)  # stale client value ignored
@@ -182,6 +188,34 @@ class TestSoftDelete(IntegrityBase):
             self.log()
         self.db.toggle_hide_task("T1", 1)
         self.log()
+
+
+class TestEntryTypeRule(IntegrityBase):
+    def test_new_task_only_for_the_first_entry(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.log(entry_type="CONTINUATION")
+        self.assertIn("must be New Task", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            self.log(entry_type="REVISION")
+        self.assertEqual(self.db.get_tasks(project_id="P1")[0]["log_count"], 0)
+        first = self.log(entry_type="NEW")
+        self.assertTrue(first["first_entry"])
+        # Shared by all Heads of the task: another Head cannot add a second New Task entry
+        with self.assertRaises(ValueError) as ctx:
+            self.log(employee="h2", entry_type="NEW")
+        self.assertIn("Continuation or Revision", str(ctx.exception))
+        self.assertEqual(self.log(employee="h2", entry_type="CONTINUATION")["entry_type"], "CONTINUATION")
+        self.assertEqual(self.log(entry_type="REVISION")["revision_number"], 1)
+        self.assertEqual(self.db.get_tasks(project_id="P1")[0]["log_count"], 3)
+        # A resend of the stored New Task entry is still accepted (idempotent), not rejected
+        again = self.db.submit_progress_log({"log_id": first["log_id"], "employee_id": "h1", "project_id": "P1",
+                                             "task_id": "T1", "progress_stage": "In Progress", "entry_type": "NEW"})
+        self.assertEqual(again["log_id"], first["log_id"])
+
+    def test_missing_entry_type_is_chosen_from_history(self):
+        """Older clients that send no entry type get New first, then Continuation."""
+        self.assertEqual(self.log(entry_type=None)["entry_type"], "NEW")
+        self.assertEqual(self.log(entry_type=None)["entry_type"], "CONTINUATION")
 
 
 class TestValidation(IntegrityBase):

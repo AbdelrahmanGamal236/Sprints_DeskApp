@@ -88,14 +88,21 @@ class TestGuiSmoke(unittest.TestCase):
                 self.assertEqual((ws.txt_task_start.text(), ws.txt_task_end.text()), ("2026-03-02", "2026-03-20"))
                 self.assertTrue(ws.txt_task_start.isReadOnly() and ws.txt_task_end.isReadOnly())
                 self.assertFalse(hasattr(ws, "spn_percentage"))
+                # First entry of the task: only New Task is possible
+                self.assertTrue(ws.rb_new.isEnabled() and ws.rb_new.isChecked())
+                self.assertFalse(ws.rb_continuation.isEnabled() or ws.rb_revision.isEnabled())
                 ws.cmb_progress.setCurrentText("In Progress")
                 ws.txt_notes.setPlainText("Smoke test log")
                 ws.on_submit_log()
+                # Right after submitting, New Task is locked and Continuation is preselected
+                self.assertFalse(ws.rb_new.isEnabled())
+                self.assertTrue(ws.rb_continuation.isEnabled() and ws.rb_continuation.isChecked())
+                self.assertTrue(ws.rb_revision.isEnabled())
                 self.assertTrue(await wait_until(
                     lambda: any(l["notes"] == "Smoke test log" for l in server.db.get_progress_logs())))
                 stored = next(l for l in server.db.get_progress_logs() if l["notes"] == "Smoke test log")
                 self.assertEqual((stored["start_date"], stored["end_date"]), ("2026-03-02", "2026-03-20"))
-                self.assertEqual(stored["progress_stage"], "In Progress")
+                self.assertEqual((stored["progress_stage"], stored["entry_type"]), ("In Progress", "NEW"))
                 self.assertTrue(await wait_until(lambda: "saved on the Central Server" in ws.toast.label.text()))
                 overlay = ws.toast._overlay()
                 self.assertTrue(overlay.isVisible())
