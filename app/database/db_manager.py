@@ -21,7 +21,7 @@ PASSWORD_MIN_LENGTH = 8
 LEGACY_DEFAULT_PRIVILEGED_IDS = ("superadmin", "admin", "coo")
 
 # Current schema version (PRAGMA user_version); see DBManager._migrate
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # System settings managed by the Super Admin: key -> (default, type, min, max, label)
 SYSTEM_SETTINGS = {
@@ -412,6 +412,14 @@ class DBManager:
                                     (row["user_id"], row["user_id"]))
                 cur.execute("PRAGMA user_version = 5")
             logger.info("Database migrated to schema version 5 (readable passwords for the Super Admin).")
+
+        if version < 6:
+            # The Admin may rename a requested task when approving it; the Head's wording stays in task_name
+            with self.transaction() as cur:
+                if "approved_task_name" not in columns(cur, "task_proposals"):
+                    cur.execute("ALTER TABLE task_proposals ADD COLUMN approved_task_name TEXT")
+                cur.execute("PRAGMA user_version = 6")
+            logger.info("Database migrated to schema version 6 (task name chosen at approval).")
 
         with self.get_connection() as conn:
             orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -1244,8 +1252,10 @@ class DBManager:
             "status": "PENDING", "created_at": now_str
         }
 
-    def approve_task_proposal(self, proposal_id: str, admin_id: str) -> dict:
+    def approve_task_proposal(self, proposal_id: str, admin_id: str, task_name: str = None) -> dict:
+        """task_name lets the approver rename the task; the requested name is kept on the proposal."""
         now_str = now_local()
+        new_name = clean_text(task_name, "Task name", MAX_NAME_LEN)
         with self.transaction() as cur:
             cur.execute("SELECT * FROM task_proposals WHERE proposal_id = ?", (proposal_id,))
             prop = cur.fetchone()
@@ -1260,20 +1270,24 @@ class DBManager:
             today_str = datetime.now().strftime("%Y-%m-%d")
             p_start = prop["planned_start_date"] or today_str
             p_end = prop["planned_end_date"] or p_start
+            final_name = new_name or prop["task_name"]
+            approved_name = final_name if final_name != prop["task_name"] else None
             task_id = self._next_task_id(cur)
             cur.execute("""
             INSERT INTO tasks (task_id, project_id, name, is_hidden, proposed_by_id, discipline_id,
                                planned_start_date, planned_end_date)
             VALUES (?, ?, ?, 0, ?, ?, ?, ?)
-            """, (task_id, prop["project_id"], prop["task_name"], prop["proposed_by_id"], prop["discipline_id"],
+            """, (task_id, prop["project_id"], final_name, prop["proposed_by_id"], prop["discipline_id"],
                   p_start, p_end))
             cur.execute("""
-            UPDATE task_proposals SET status = 'APPROVED', admin_id = ?, decided_at = ?, task_id = ?
+            UPDATE task_proposals SET status = 'APPROVED', admin_id = ?, decided_at = ?, task_id = ?,
+                                      approved_task_name = ?
             WHERE proposal_id = ?
-            """, (admin_id, now_str, task_id, proposal_id))
+            """, (admin_id, now_str, task_id, approved_name, proposal_id))
 
         result = dict(prop)
-        result.update({"task_id": task_id, "status": "APPROVED", "admin_id": admin_id, "decided_at": now_str})
+        result.update({"task_id": task_id, "status": "APPROVED", "admin_id": admin_id, "decided_at": now_str,
+                       "approved_task_name": approved_name})
         return result
 
     def reject_task_proposal(self, proposal_id: str, admin_id: str, reason: str) -> dict:

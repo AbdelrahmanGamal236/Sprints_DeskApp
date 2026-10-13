@@ -112,6 +112,25 @@ class TestApprovalStateMachine(IntegrityBase):
         with self.assertRaises(ValueError):
             self.db.reject_task_proposal("PROP-1", "adm", "too late")
 
+    def test_approver_can_rename_the_task(self):
+        self.db.create_task_proposal("P1", "drainige study", "h1", "URB", "2026-10-05", "2026-10-09", "PROP-R")
+        with self.assertRaises(ValueError):
+            self.db.approve_task_proposal("PROP-R", "adm", "x" * 201)  # same length limit as any task name
+        a = self.db.approve_task_proposal("PROP-R", "adm", "  Drainage Study - Phase 1  ")
+        self.assertEqual(a["approved_task_name"], "Drainage Study - Phase 1")
+        task = next(t for t in self.db.get_tasks() if t["task_id"] == a["task_id"])
+        self.assertEqual(task["name"], "Drainage Study - Phase 1")
+        self.assertEqual((task["planned_start_date"], task["planned_end_date"]), ("2026-10-05", "2026-10-09"))
+        prop = next(p for p in self.db.get_task_proposals() if p["proposal_id"] == "PROP-R")
+        self.assertEqual((prop["task_name"], prop["approved_task_name"]), ("drainige study", "Drainage Study - Phase 1"))
+        # A repeated approval (e.g. double click) never creates a second task or renames again
+        again = self.db.approve_task_proposal("PROP-R", "adm", "Other name")
+        self.assertEqual(again["task_id"], a["task_id"])
+        self.assertEqual(len([t for t in self.db.get_tasks() if t["proposed_by_id"] == "h1"]), 1)
+        # Keeping the requested name (or sending none) records no rename
+        self.db.create_task_proposal("P1", "Kept name", "h1", "URB", proposal_id="PROP-K")
+        self.assertIsNone(self.db.approve_task_proposal("PROP-K", "adm", "Kept name")["approved_task_name"])
+
     def test_rejected_cannot_be_approved(self):
         self.db.create_task_proposal("P1", "Bad idea", "h1", proposal_id="PROP-2")
         r = self.db.reject_task_proposal("PROP-2", "adm", "Out of scope")

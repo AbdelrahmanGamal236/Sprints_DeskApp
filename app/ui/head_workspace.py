@@ -777,7 +777,9 @@ class HeadWorkspace(QMainWindow):
             st = prop.get("status")
             name = prop.get("task_name")
             if st == "APPROVED":
-                self.toast.show_message(f"Admin APPROVED your task proposal: '{name}'!")
+                renamed = prop.get("approved_task_name")
+                self.toast.show_message(f"Admin APPROVED your task request '{name}'" +
+                                        (f", renamed to '{renamed}'." if renamed else "."))
             elif st == "REJECTED":
                 reason = prop.get("rejection_reason", "No reason provided")
                 self.toast.show_message(f"Admin REJECTED task proposal '{name}': {reason}", is_warning=True)
@@ -893,7 +895,10 @@ class HeadWorkspace(QMainWindow):
             self.tbl_proposals.setItem(r_idx, 0, create_table_item(p["proposal_id"], Qt.AlignCenter))
             self.tbl_proposals.setItem(r_idx, 1, create_table_item(p["task_id"] or "Pending", Qt.AlignCenter))
             self.tbl_proposals.setItem(r_idx, 2, create_table_item(p.get("project_name") or p["project_id"], Qt.AlignLeft | Qt.AlignVCenter))
-            self.tbl_proposals.setItem(r_idx, 3, create_table_item(p["task_name"], Qt.AlignLeft | Qt.AlignVCenter))
+            shown_name = p["task_name"]
+            if p.get("approved_task_name"):
+                shown_name = f"{p['approved_task_name']} (requested as: {p['task_name']})"
+            self.tbl_proposals.setItem(r_idx, 3, create_table_item(shown_name, Qt.AlignLeft | Qt.AlignVCenter))
 
             st_item = create_table_item(p["status"], Qt.AlignCenter)
             if p["status"] == "APPROVED":

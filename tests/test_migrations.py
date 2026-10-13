@@ -50,6 +50,7 @@ class MigrationTestBase(unittest.TestCase):
             cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
             self.assertTrue({"is_deleted", "deleted_at", "deleted_by"} <= cols, table)
         self.assertIn("password_plain", {r[1] for r in con.execute("PRAGMA table_info(users)")})
+        self.assertIn("approved_task_name", {r[1] for r in con.execute("PRAGMA table_info(task_proposals)")})
         log_cols = {r[1] for r in con.execute("PRAGMA table_info(progress_logs)")}
         self.assertTrue({"discipline_id", "assigned_to", "entry_type", "revision_number"} <= log_cols)
         con.close()

@@ -879,7 +879,7 @@ class AdminPanel(QWidget):
 
             btn_app = QPushButton("Approve")
             btn_app.setObjectName("SuccessButton")
-            btn_app.clicked.connect(lambda _, pid=p["proposal_id"]: self.on_approve_proposal(pid))
+            btn_app.clicked.connect(lambda _, pid=p["proposal_id"], name=p["task_name"]: self.on_approve_proposal(pid, name))
 
             btn_rej = QPushButton("Reject")
             btn_rej.setObjectName("DangerButton")
@@ -887,9 +887,21 @@ class AdminPanel(QWidget):
 
             self.tbl_pending_proposals.setCellWidget(r_idx, 6, create_table_action_cell([btn_app, btn_rej]))
 
-    def on_approve_proposal(self, proposal_id: str):
-        self.mutate("APPROVE_TASK_PROPOSAL", {"proposal_id": proposal_id},
-                    "Proposal approved and task created.", error_title="Could Not Approve")
+    def on_approve_proposal(self, proposal_id: str, requested_name: str = ""):
+        """The approver confirms the task name and may rename it; the Head's wording is kept on the request."""
+        name, ok = QInputDialog.getText(self, "Approve Task Request",
+                                        "Task name (edit it to rename the task, or keep the requested name):",
+                                        QLineEdit.Normal, requested_name)
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "Error", "The task name cannot be empty.")
+            return
+        renamed = name != requested_name.strip()
+        self.mutate("APPROVE_TASK_PROPOSAL", {"proposal_id": proposal_id, "task_name": name},
+                    f"Request approved; task '{name}' created" + (" (renamed)." if renamed else "."),
+                    error_title="Could Not Approve")
 
     def on_reject_proposal(self, proposal_id: str):
         reason, ok = QInputDialog.getText(self, "Reject Task Proposal", "Enter mandatory rejection reason:")

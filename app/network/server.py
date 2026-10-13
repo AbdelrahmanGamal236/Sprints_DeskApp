@@ -398,7 +398,8 @@ class CentralWebSocketServer:
     @action("APPROVE_TASK_PROPOSAL", roles=MANAGERS)
     async def a_approve_proposal(self, ws, session, payload, msg_id):
         _require(payload, "proposal_id")
-        prop = await self.db_call(self.db.approve_task_proposal, payload["proposal_id"], session.user_id)
+        prop = await self.db_call(self.db.approve_task_proposal, payload["proposal_id"], session.user_id,
+                                  payload.get("task_name"))
         await self.broadcast({"type": "TASK_PROPOSAL_DECIDED_EVENT", "proposal": prop},
                              target_roles=MANAGERS, extra_user_ids=(prop.get("proposed_by_id"),))
         await self.notify_changed("tasks")

@@ -416,6 +416,28 @@ class TestSettingsAndEvents(unittest.TestCase):
 
 
 class TestSoftDeleteProtocol(unittest.TestCase):
+    def test_admin_renames_requested_task_on_approval(self):
+        async def scenario():
+            server = await start_server()
+            try:
+                head = await raw_login(server.port, "h_urb")
+                r = await head.req("PROPOSE_TASK", {"proposal_id": "PROP-X", "project_id": "P1", "task_name": "site srvey",
+                                                    "planned_start_date": "2026-10-01", "planned_end_date": "2026-10-14"})
+                self.assertTrue(r["ok"], r)
+                adm = await raw_login(server.port, "adm")
+                r = await adm.req("APPROVE_TASK_PROPOSAL", {"proposal_id": "PROP-X", "task_name": "Site Survey"})
+                self.assertTrue(r["ok"], r)
+                ev = await head.wait_for(lambda d: d.get("type") == "TASK_PROPOSAL_DECIDED_EVENT")
+                self.assertEqual((ev["proposal"]["task_name"], ev["proposal"]["approved_task_name"]),
+                                 ("site srvey", "Site Survey"))
+                snap = await head.req("GET_SNAPSHOT", {})
+                self.assertIn("Site Survey", [t["name"] for t in snap["tasks"]])
+                props = (await head.req("GET_TASK_PROPOSALS", {}))["proposals"]
+                self.assertEqual(next(p for p in props if p["proposal_id"] == "PROP-X")["approved_task_name"], "Site Survey")
+            finally:
+                await server.stop()
+        run(scenario())
+
     def test_deleted_project_disappears_for_heads_and_keeps_logs(self):
         async def scenario():
             server = await start_server()

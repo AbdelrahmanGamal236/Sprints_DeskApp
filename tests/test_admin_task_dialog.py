@@ -59,6 +59,24 @@ class TestAdminAddTaskDialog(unittest.TestCase):
                 self.assertTrue(await wait_until(lambda: any(t["name"] == "Directly added task"
                                                              for t in ws.tasks_data)))
                 self.assertEqual(errors, [])
+
+                # Approve a Head's request through the Approve button, renaming the task
+                server.db.create_task_proposal("P1", "drainge stdy", "h_urb", "URB", "2026-10-01", "2026-10-14", "PROP-UI")
+                await server.notify_changed("proposals")
+                self.assertTrue(await wait_until(lambda: ws.tbl_pending_proposals.rowCount() == 1))
+                from PySide6.QtWidgets import QInputDialog
+                asked = []
+                orig_get = QInputDialog.getText
+                QInputDialog.getText = staticmethod(lambda *a, **k: (asked.append(a[-1]), ("Drainage Study", True))[1])
+                try:
+                    cell = ws.tbl_pending_proposals.cellWidget(0, 6)
+                    next(b for b in cell.findChildren(QPushButton) if b.text() == "Approve").click()
+                finally:
+                    QInputDialog.getText = orig_get
+                self.assertEqual(asked, ["drainge stdy"])  # dialog pre-filled with the requested name
+                self.assertTrue(await wait_until(lambda: any(t["name"] == "Drainage Study" for t in server.db.get_tasks())))
+                self.assertTrue(await wait_until(lambda: ws.tbl_pending_proposals.rowCount() == 0))
+                self.assertEqual(errors, [])
             finally:
                 QDialog.exec = orig_exec
                 QMessageBox.critical, QMessageBox.warning = orig_critical, orig_warning
