@@ -3,6 +3,7 @@ import base64
 import functools
 import json
 import logging
+import re
 import sqlite3
 import time
 import uuid
@@ -663,8 +664,8 @@ class CentralWebSocketServer:
     @action("EXPORT_EXCEL_REQUEST", roles=OVERSIGHT, response_type="EXPORT_EXCEL_RESPONSE")
     async def a_export(self, ws, session, payload, msg_id):
         loop = asyncio.get_running_loop()
-        raw = await loop.run_in_executor(self._export_executor, functools.partial(
-            self.excel_service.export_logs_to_excel,
+        raw, counts = await loop.run_in_executor(self._export_executor, functools.partial(
+            self.excel_service.build_report,
             project_id=payload.get("project_id"), discipline_id=payload.get("discipline_id"),
             employee_id=payload.get("employee_id"), start_date=payload.get("start_date"),
             end_date=payload.get("end_date"), generated_by=f"{session.full_name or ''} ({session.user_id})".strip()))
@@ -678,6 +679,8 @@ class CentralWebSocketServer:
             if not ok:
                 raise ConnectionError("Client disconnected during export.")
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
-        return {"filename": f"Progress_Logs_{payload.get('discipline_id') or 'ALL'}_{stamp}.xlsx",
-                "total_chunks": total, "size": len(raw)}
+        parts = [payload.get("project_id"), payload.get("discipline_id"), payload.get("employee_id")]
+        scope = "_".join(re.sub(r"[^A-Za-z0-9-]", "", str(x)) for x in parts if x) or "ALL"
+        return {"filename": f"Progress_Logs_{scope}_{stamp}.xlsx", "total_chunks": total, "size": len(raw),
+                "log_count": counts["logs"], "task_count": counts["tasks"]}
 

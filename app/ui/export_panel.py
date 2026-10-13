@@ -62,7 +62,8 @@ class ExportPanel(QWidget):
         self._toggle_dates(False)
         c_layout.addLayout(dates)
 
-        hint = QLabel("The workbook has an 'All Logs' sheet, one sheet per discipline and a 'Report Info' sheet. "
+        hint = QLabel("The workbook has an 'All Logs' sheet (every log, newest first), a 'Task Summary' sheet (each "
+                      "task's dates and latest status), one sheet per discipline and a 'Report Info' sheet. "
                       "Hidden or deleted projects, tasks and disciplines are labelled and their logs are kept.", self)
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #A1A1AA; font-size: 11px;")
@@ -165,7 +166,14 @@ class ExportPanel(QWidget):
 
     def _on_ready(self, result):
         self.btn_export.setEnabled(True)
-        raw_bytes, default_name = result
+        raw_bytes, default_name, reply = result
+        logs, tasks = reply.get("log_count"), reply.get("task_count")
+        if logs == 0 and tasks == 0:
+            QMessageBox.information(self, "Nothing to Export",
+                                    "No tasks or progress logs match these filters. Change the filters and try again.")
+            return
+        if logs is not None:
+            self._notify(f"Report ready: {logs} progress logs, {tasks} tasks.")
         save_excel_report(self, raw_bytes, default_name)
 
 

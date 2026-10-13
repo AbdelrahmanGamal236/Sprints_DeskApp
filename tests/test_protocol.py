@@ -508,6 +508,9 @@ class TestExportStreaming(unittest.TestCase):
                 self.assertEqual(len(raw), final["size"])
                 wb = load_workbook(io.BytesIO(raw), read_only=True)
                 self.assertIn("All Logs", wb.sheetnames)
+                self.assertIn("Task Summary", wb.sheetnames)
+                self.assertGreater(final["log_count"], 0)
+                self.assertIn("task_count", final)
             finally:
                 await server.stop()
         run(scenario())

@@ -260,8 +260,8 @@ class NetworkClient(QObject):
         """Fire a request from Qt code; callbacks receive the reply dict or the exception."""
         return run_async(self.request(action, payload, timeout), on_ok, on_err)
 
-    async def export_excel(self, filters: dict, timeout: float = 600.0) -> tuple[bytes, str]:
-        """Request a server-side Excel export and reassemble the chunked workbook."""
+    async def export_excel(self, filters: dict, timeout: float = 600.0) -> tuple[bytes, str, dict]:
+        """Request a server-side Excel export and reassemble it. Returns (bytes, file name, reply)."""
         if not self.is_connected or self.websocket is None:
             raise OfflineError("Not connected to the Central Server.")
         msg_id = f"EXP-{uuid.uuid4().hex}"
@@ -284,7 +284,7 @@ class NetworkClient(QObject):
         if len(chunks) != reply.get("total_chunks"):
             raise ServerError(P.ERR_INTERNAL, "Export was incomplete. Please try again.")
         data = b"".join(base64.b64decode(c["data_b64"]) for c in chunks)
-        return data, reply.get("filename") or "Progress_Logs.xlsx"
+        return data, reply.get("filename") or "Progress_Logs.xlsx", reply
 
     async def change_password(self, new_password: str, old_password: str = None) -> dict:
         reply = await self.request("CHANGE_PASSWORD", {"new_password": new_password, "old_password": old_password})

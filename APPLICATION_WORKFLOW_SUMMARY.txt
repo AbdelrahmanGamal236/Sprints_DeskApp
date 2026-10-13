@@ -191,7 +191,11 @@ B. data/client_queue.db (each workstation)
   submitted from the From date to the To date (both inclusive). Columns:
   Submitted Date, Submitted Time, Head ID/Name/Discipline, Project, Task ID,
   Task, Discipline, Task Start/End Date, Status, Entry Type, Revision Tag,
-  Assigned To, Notes, Log ID; newest first. Workbook: "All Logs", one sheet per discipline (when not
+  Assigned To, Notes, Log ID; newest first. "Task Summary" sheet: every task
+  in the project/discipline/Head scope (even with no logs) with its planned
+  dates, latest status, last update, who updated it and the number of logs
+  in the report. If nothing matches, the client says so instead of saving
+  an empty file. Workbook: "All Logs", one sheet per discipline (when not
   filtered to one), "Report Info" (filters, rule, row count, generated
   at/by). Hidden/deleted projects, tasks and disciplines are labelled and shown
   in grey. Built on its own thread and sent in chunks.

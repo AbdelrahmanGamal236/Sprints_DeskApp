@@ -16,6 +16,12 @@ HEADERS = [
     "Project", "Task ID", "Task", "Discipline", "Task Start Date", "Task End Date",
     "Status", "Entry Type", "Revision Tag", "Assigned To", "Notes", "Log ID",
 ]
+# One row per task in the selected project / discipline / Head, so a report is useful even before any
+# log exists: the task's planned dates and its latest reported status (from the logs in this report).
+TASK_HEADERS = [
+    "Project", "Task ID", "Task", "Discipline", "Assigned Head", "Task Start Date", "Task End Date",
+    "Latest Status", "Last Update", "Last Updated By", "Logs in Report",
+]
 ENTRY_LABELS = {"NEW": "New", "CONTINUATION": "Continuation", "REVISION": "Revision"}
 MAX_WIDTH = 60
 
@@ -85,9 +91,45 @@ class ExcelExportService:
             ], inactive))
         return rows
 
-    def _write_sheet(self, wb, title: str, rows: list):
+    def tasks_in_scope(self, project_id: str = None, discipline_id: str = None, employee_id: str = None) -> list[dict]:
+        """Tasks a report covers: the filters' project and discipline, and for a Head the tasks they can log on."""
+        tasks = self.db.get_tasks(project_id=project_id, discipline_id=discipline_id, include_hidden=True)
+        if employee_id:
+            head = self.db.get_user(employee_id) or {}
+            tasks = [t for t in tasks
+                     if (not head.get("discipline_id") or t.get("discipline_id") == head.get("discipline_id"))
+                     and t.get("assigned_head_id") in (None, "", employee_id)]
+        return tasks
+
+    @staticmethod
+    def build_task_rows(tasks: list[dict], logs: list[dict]) -> list[tuple[list, bool]]:
+        latest, counts = {}, {}
+        for log in logs:  # newest first
+            counts[log["task_id"]] = counts.get(log["task_id"], 0) + 1
+            latest.setdefault(log["task_id"], log)
+        rows = []
+        for t in tasks:
+            last = latest.get(t["task_id"])
+            inactive = bool(t.get("is_hidden") or t.get("project_hidden"))
+            rows.append(([
+                _label(t.get("project_name"), t["project_id"], t.get("project_hidden"), False, "Unknown Project"),
+                t["task_id"],
+                _label(t.get("name"), t["task_id"], t.get("is_hidden"), False, "Unknown Task"),
+                t.get("discipline_name") or t.get("discipline_id") or "Unassigned",
+                t.get("assigned_head_name") or t.get("assigned_head_id") or "All Heads",
+                t.get("planned_start_date") or "",
+                t.get("planned_end_date") or "",
+                (last.get("progress_stage") or "") if last else "No update yet",
+                (last.get("submitted_at") or "") if last else "",
+                (last.get("employee_name") or last.get("employee_id") or "") if last else "",
+                counts.get(t["task_id"], 0),
+            ], inactive))
+        return rows
+
+    def _write_sheet(self, wb, title: str, rows: list, headers: list = None):
+        headers = headers or HEADERS
         ws = wb.create_sheet(title=title)
-        widths = [len(h) for h in HEADERS]
+        widths = [len(h) for h in headers]
         for values, _ in rows:
             for i, v in enumerate(values):
                 widths[i] = max(widths[i], len(str(v)))
@@ -96,7 +138,7 @@ class ExcelExportService:
         ws.freeze_panes = "A2"
 
         header_cells = []
-        for h in HEADERS:
+        for h in headers:
             c = WriteOnlyCell(ws, value=h)
             c.font, c.fill, c.alignment, c.border = _HEADER_FONT, _HEADER_FILL, _CENTER, _BORDER
             header_cells.append(c)
@@ -115,13 +157,18 @@ class ExcelExportService:
                 cells.append(c)
             ws.append(cells)
 
-    def export_logs_to_excel(self, output_path: str = None, project_id: str = None,
-                             discipline_id: str = None, employee_id: str = None,
-                             start_date: str = None, end_date: str = None,
-                             generated_by: str = None) -> bytes:
+    def export_logs_to_excel(self, output_path: str = None, **filters) -> bytes:
+        excel_bytes, _counts = self.build_report(**filters)
+        if output_path:
+            with open(output_path, "wb") as f:
+                f.write(excel_bytes)
+        return excel_bytes
+
+    def build_report(self, project_id: str = None, discipline_id: str = None, employee_id: str = None,
+                     start_date: str = None, end_date: str = None, generated_by: str = None) -> tuple[bytes, dict]:
         """
-        Builds the progress-log workbook on the server.
-        Sheets: "All Logs", one sheet per discipline (when not filtered to one discipline), and "Report Info".
+        Builds the progress-log workbook on the server. Returns (xlsx bytes, {"logs": n, "tasks": n}).
+        Sheets: "All Logs", "Task Summary", one sheet per discipline (when not filtered to one), "Report Info".
         Date range: a log is included when it was submitted on a day from start_date to end_date.
         Logs of hidden/deleted projects, tasks and disciplines are included and labelled.
         """
@@ -132,10 +179,13 @@ class ExcelExportService:
         logs = self.db.get_progress_logs(project_id=project_id, discipline_id=discipline_id,
                                          employee_id=employee_id, start_date=start_date, end_date=end_date)
         rows = self.build_rows(logs)
+        tasks = self.tasks_in_scope(project_id, discipline_id, employee_id)
+        task_rows = self.build_task_rows(tasks, logs)
 
         wb = openpyxl.Workbook(write_only=True)
         used = set()
         self._write_sheet(wb, _sheet_title("All Logs", used), rows)
+        self._write_sheet(wb, _sheet_title("Task Summary", used), task_rows, TASK_HEADERS)
 
         if not discipline_id:
             disc_names = {d["discipline_id"]: d["name"] for d in self.db.get_disciplines(include_hidden=True)}
@@ -154,17 +204,14 @@ class ExcelExportService:
             "To date": end_date or "-",
             "Date rule": "A log is included when it was submitted between the From and To dates (inclusive)",
             "Rows exported": len(rows),
+            "Tasks in summary": len(task_rows),
             "Generated at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Generated by": generated_by or "-",
         })
 
         buf = io.BytesIO()
         wb.save(buf)
-        excel_bytes = buf.getvalue()
-        if output_path:
-            with open(output_path, "wb") as f:
-                f.write(excel_bytes)
-        return excel_bytes
+        return buf.getvalue(), {"logs": len(rows), "tasks": len(task_rows)}
 
     @staticmethod
     def _write_info_sheet(wb, title: str, info: dict):

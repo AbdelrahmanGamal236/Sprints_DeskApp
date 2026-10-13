@@ -1,10 +1,14 @@
 from datetime import datetime, timedelta
 from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QDate, Signal
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QPainterPath
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QLinearGradient, QPainterPath
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QSizePolicy, QToolTip, QButtonGroup
 )
+
+# Bold in both states so the checked button is not wider than the space Qt measured for it
+FILTER_BUTTON_QSS = 'QPushButton { font-weight: bold; padding: 6px 14px; } QPushButton:checked { background-color: #7C3AED; color: #FFFFFF; }'
+
 
 class TimelineCanvas(QWidget):
     """Custom canvas that renders the progressive Gantt/timeline schedule of tasks."""
@@ -17,7 +21,7 @@ class TimelineCanvas(QWidget):
         self.total_days = 30
         self.row_height = 46
         self.header_height = 42
-        self.left_margin = 250
+        self.left_margin = 340
         self.hovered_task = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
 
@@ -58,7 +62,7 @@ class TimelineCanvas(QWidget):
         self.total_days = max((self.max_date - self.min_date).days, 7)
 
     def _date_to_x(self, dt: datetime, available_width: int) -> float:
-        delta = (dt - self.min_date).total_days()
+        delta = (dt - self.min_date).total_seconds() / 86400.0
         pct = max(0.0, min(1.0, delta / self.total_days))
         return self.left_margin + pct * available_width
 
@@ -146,26 +150,31 @@ class TimelineCanvas(QWidget):
             disc = t.get("discipline_id") or "GEN"
             head_name = t.get("assigned_head_name") or (f"ID: {t['assigned_head_id']}" if t.get("assigned_head_id") else "All Heads")
 
-            # Discipline tag
-            disc_pill = QRectF(14, y + 13, 38, 20)
+            # Discipline tag, sized to its text (e.g. "Infrastructure")
+            pill_font = QFont("Segoe UI", 8, QFont.Bold)
+            pill_w = min(max(QFontMetrics(pill_font).horizontalAdvance(disc) + 12, 38), 96)
+            disc_pill = QRectF(14, y + 13, pill_w, 20)
             painter.setBrush(QColor("#3B0764"))
             painter.setPen(QColor("#C4B5FD"))
             painter.drawRoundedRect(disc_pill, 4, 4)
             painter.setPen(QColor("#EDE9FE"))
-            painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            painter.setFont(pill_font)
             painter.drawText(disc_pill, Qt.AlignCenter, disc)
 
-            # Task title
+            # Task title and Head, shortened with "..." when too long (full text in the tooltip)
+            text_x = int(14 + pill_w + 8)
+            text_w = self.left_margin - text_x - 10
+            title_font = QFont("Segoe UI", 9, QFont.DemiBold)
             painter.setPen(QColor("#F4F4F5"))
-            painter.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
-            task_label = f"{name} ({tid})"
-            painter.drawText(QRect(58, y + 6, self.left_margin - 68, 18), Qt.AlignVCenter | Qt.AlignLeft, task_label)
+            painter.setFont(title_font)
+            task_label = QFontMetrics(title_font).elidedText(f"{name} ({tid})", Qt.ElideRight, text_w)
+            painter.drawText(QRect(text_x, y + 6, text_w, 18), Qt.AlignVCenter | Qt.AlignLeft, task_label)
 
-            # Assigned Head tag
+            head_font = QFont("Segoe UI", 8)
             painter.setPen(QColor("#A1A1AA"))
-            painter.setFont(QFont("Segoe UI", 8))
-            head_str = f"Head: {head_name}"
-            painter.drawText(QRect(58, y + 24, self.left_margin - 68, 16), Qt.AlignVCenter | Qt.AlignLeft, head_str)
+            painter.setFont(head_font)
+            head_str = QFontMetrics(head_font).elidedText(f"Head: {head_name}", Qt.ElideRight, text_w)
+            painter.drawText(QRect(text_x, y + 24, text_w, 16), Qt.AlignVCenter | Qt.AlignLeft, head_str)
 
             # ----------------- PROGRESSIVE TIMELINE BAR -----------------
             s_str = t.get("planned_start_date")
@@ -348,7 +357,7 @@ class ProjectProgressiveTimelineWidget(QWidget):
 
         # ----------------- 2. DISCIPLINE FILTER BAR -----------------
         self.filter_scroll = QScrollArea()
-        self.filter_scroll.setFixedHeight(48)
+        self.filter_scroll.setFixedHeight(62)
         self.filter_scroll.setWidgetResizable(True)
         self.filter_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
@@ -361,7 +370,7 @@ class ProjectProgressiveTimelineWidget(QWidget):
         self.btn_filter_all = QPushButton("All Disciplines")
         self.btn_filter_all.setCheckable(True)
         self.btn_filter_all.setChecked(True)
-        self.btn_filter_all.setStyleSheet("QPushButton:checked { background-color: #7C3AED; color: #FFFFFF; font-weight: bold; }")
+        self.btn_filter_all.setStyleSheet(FILTER_BUTTON_QSS)
         self.btn_filter_all.clicked.connect(lambda: self.on_discipline_filter(None))
         self.filter_group.addButton(self.btn_filter_all)
         self.filter_layout.addWidget(self.btn_filter_all)
@@ -410,6 +419,10 @@ class ProjectProgressiveTimelineWidget(QWidget):
         self.progress_track.layout().setStretch(1, space_ratio)
 
         self.all_tasks = data.get("tasks", [])
+        # A discipline filter from the previous project must not hide this project's tasks
+        if self.active_discipline and not any(t.get("discipline_id") == self.active_discipline for t in self.all_tasks):
+            self.active_discipline = None
+            self.btn_filter_all.setChecked(True)
         self.rebuild_discipline_filters()
         self.apply_filter()
 
@@ -433,7 +446,8 @@ class ProjectProgressiveTimelineWidget(QWidget):
         for d_id, d_name in seen_discs.items():
             btn = QPushButton(f"{d_name} ({d_id})")
             btn.setCheckable(True)
-            btn.setStyleSheet("QPushButton:checked { background-color: #7C3AED; color: #FFFFFF; font-weight: bold; }")
+            btn.setChecked(d_id == self.active_discipline)
+            btn.setStyleSheet(FILTER_BUTTON_QSS)
             btn.clicked.connect(lambda _, did=d_id: self.on_discipline_filter(did))
             self.filter_group.addButton(btn)
             self.filter_layout.insertWidget(self.filter_layout.count() - 1, btn)

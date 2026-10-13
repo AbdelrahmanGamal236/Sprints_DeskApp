@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 
 from app.core.config import ROLE_HEAD, ROLE_SUPER_ADMIN
 from app.database.db_manager import DBManager
-from app.services.excel_service import ExcelExportService, HEADERS
+from app.services.excel_service import ExcelExportService, HEADERS, TASK_HEADERS
 
 
 class ReportBase(unittest.TestCase):
@@ -127,7 +127,37 @@ class TestExcelContent(ReportBase):
             self.svc.export_logs_to_excel(start_date="2026-10-10", end_date="2026-10-01")
 
         wb = self.workbook(discipline_id="URB")
-        self.assertEqual(wb.sheetnames, ["All Logs", "Report Info"])
+        self.assertEqual(wb.sheetnames, ["All Logs", "Task Summary", "Report Info"])
+
+    def test_task_summary(self):
+        """Every task in the filters' scope is listed, with its dates and latest status, even without logs."""
+        self.db.update_task("U1", planned_start_date="2026-10-01", planned_end_date="2026-10-14")
+        self.log("hu", "U1", submitted="2026-10-12 09:00:00")
+        self.log("hu", "U1", progress_stage="Done", submitted="2026-10-13 15:30:00")
+        self.db.toggle_hide_task("U2", 0)
+
+        def summary(**f):
+            ws = self.workbook(**f)["Task Summary"]
+            self.assertEqual([c.value for c in ws[1]], TASK_HEADERS)
+            return {r["Task ID"]: r for r in self.rows(ws)}
+
+        urb = summary(discipline_id="URB")
+        self.assertEqual(set(urb), {"U1", "U2"})
+        self.assertEqual((urb["U1"]["Task Start Date"], urb["U1"]["Task End Date"]), ("2026-10-01", "2026-10-14"))
+        self.assertEqual((urb["U1"]["Latest Status"], urb["U1"]["Last Update"]), ("Done", "2026-10-13 15:30:00"))
+        self.assertEqual((urb["U1"]["Last Updated By"], urb["U1"]["Logs in Report"]), ("Urban Head", 2))
+        self.assertEqual((urb["U2"]["Latest Status"], urb["U2"]["Logs in Report"]), ("No update yet", 0))
+        self.assertEqual(urb["U2"]["Task"], "Landscape (Hidden)")
+        # Date range limits the logs the status is taken from, not the task list
+        early = summary(discipline_id="URB", end_date="2026-10-12")
+        self.assertEqual((early["U1"]["Latest Status"], early["U1"]["Logs in Report"]), ("In Progress", 1))
+        self.assertEqual(set(summary(project_id="P2")), {"M1"})
+        self.assertEqual(set(summary(employee_id="hs")), {"S1", "S2"})  # a Head's own discipline tasks
+        # Counts reported to the client (used for the "Nothing to Export" message)
+        _data, counts = self.svc.build_report(project_id="P2", discipline_id="URB")
+        self.assertEqual(counts, {"logs": 0, "tasks": 0})
+        _data, counts = self.svc.build_report(discipline_id="URB")
+        self.assertEqual(counts, {"logs": 2, "tasks": 2})
 
     def test_empty_export_still_valid(self):
         wb = self.workbook(project_id="P2")
