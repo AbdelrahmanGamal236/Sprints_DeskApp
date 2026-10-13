@@ -73,7 +73,8 @@ A. data/central_app.db (server only). Schema version in PRAGMA user_version.
   task_proposals     proposal_id PK (client UUID), project_id, task_name,
                      proposed_by_id, discipline_id, planned dates, status
                      (PENDING|APPROVED|REJECTED), task_id (set on approval),
-                     admin_id, rejection_reason, created_at, decided_at
+                     admin_id, rejection_reason, created_at, decided_at,
+                     approved_task_name (set when the approver renamed it)
   task_date_change_requests  request_id PK (client UUID), task_id,
                      requested_by_id, old/new start+end dates, reason, status,
                      admin_id, rejection_reason, created_at, decided_at
@@ -159,6 +160,10 @@ B. data/client_queue.db (each workstation)
 4.5 Task proposal (Head -> Admin)
   PROPOSE_TASK {proposal_id, project_id, task_name, dates} -> PENDING.
   Admin approves (creates task TSK-NN) or rejects with a mandatory reason.
+  Approve opens a dialog pre-filled with the requested name; the Admin can
+  rename the task there (APPROVE_TASK_PROPOSAL {proposal_id, task_name}).
+  The task gets the final name; the Head's wording stays in task_name and
+  the Head sees "<new name> (requested as: <old name>)".
   Only PENDING can be decided; approving twice is a no-op. The proposer and
   the managers get a DATA_CHANGED("proposals") event; all clients get
   DATA_CHANGED("tasks") on approval.

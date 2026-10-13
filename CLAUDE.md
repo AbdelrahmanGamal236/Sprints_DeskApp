@@ -34,7 +34,7 @@ DeskAppServer.exe (main.py --server-only)  DeskApp.exe (main.py)
 
 ## Data model notes
 
-- Schema migrations: `DBManager._migrate()`, tracked with `PRAGMA user_version` (currently `SCHEMA_VERSION = 5`). Add a new numbered step; each step must be idempotent and run in a transaction. Test it against the fixtures in `tests/fixtures/` and against real DB copies (`tests/test_migrations.py`). **Never delete or rewrite user data in a migration**; report dangling rows instead.
+- Schema migrations: `DBManager._migrate()`, tracked with `PRAGMA user_version` (currently `SCHEMA_VERSION = 6`). Add a new numbered step; each step must be idempotent and run in a transaction. Test it against the fixtures in `tests/fixtures/` and against real DB copies (`tests/test_migrations.py`). **Never delete or rewrite user data in a migration**; report dangling rows instead.
 - **Soft delete:** `projects.is_deleted` / `tasks.is_deleted`. Deleted rows disappear from every list but keep their logs; Excel labels them "(Deleted)". **Hide** (`is_hidden`) is a separate, reversible flag.
 - **Revision numbers** (R1, R2...) are assigned by the server per task, inside the insert transaction. **Task IDs** (`TSK-NN`) are assigned when the task is created, never reserved earlier.
 - Timestamps are local time, `YYYY-MM-DD HH:MM:SS`. Dates are `YYYY-MM-DD`. Use `now_local()`, `parse_date()` and `check_date_order()` from `db_manager.py`.
