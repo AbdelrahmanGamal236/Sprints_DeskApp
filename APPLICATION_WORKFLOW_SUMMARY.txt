@@ -173,6 +173,15 @@ B. data/client_queue.db (each workstation)
   for a task in the Head's discipline. Approve updates the task's planned
   dates; reject needs a reason. Same PENDING-only rules as 4.5.
 
+4.7a COO log feed
+  The COO dashboard (also in the Super Admin console) lists progress logs,
+  newest first, with filters Project, Department, Head and Period (All time,
+  Today, Last 7 days, This month, Custom From/To). GET_RECENT_LOGS {limit,
+  project_id, discipline_id, employee_id, start_date, end_date} filters on
+  the server by submission day (inclusive) and returns "truncated" when more
+  than the limit (500) match. New logs reload the feed through the same
+  filters, so a log appears only if it matches.
+
 4.7 COO priority alert
   COO_NOTIFY {notification_id, target_employee_id, message} -> delivered at
   once if the Head is online, otherwise at their next login. The Head sees one

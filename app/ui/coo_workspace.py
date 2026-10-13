@@ -1,9 +1,9 @@
 import uuid
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QFrame, QComboBox, QTableWidget, 
-    QTableWidgetItem, QHeaderView, QMessageBox, QFileDialog, QSplitter
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QFrame, QComboBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QMessageBox, QFileDialog, QSplitter, QDateEdit
 )
 from app.core.settings import app_settings
 from app.network.client import NetworkClient
@@ -20,6 +20,7 @@ class CooPanel(QWidget):
         self.net_client = net_client
 
         self.users_data = []
+        self.LOG_LIMIT = 500
 
         central_widget = self
         main_layout = QVBoxLayout(self)
@@ -42,15 +43,16 @@ class CooPanel(QWidget):
         top_content = QWidget()
         top_layout = QVBoxLayout(top_content)
         top_layout.setContentsMargins(6, 6, 6, 6)
+        top_layout.addLayout(self._build_log_filters())
 
         self.tbl_logs = QTableWidget(0, 10)
         self.tbl_logs.setHorizontalHeaderLabels([
-            "Log ID", "Employee", "Discipline", "Project", "Task", "Assigned To", "Context", "Schedule", "Status", "Notes"
+            "Submitted", "Head", "Discipline", "Project", "Task", "Assigned To", "Entry", "Task Dates", "Status", "Notes"
         ])
         setup_modern_table(self.tbl_logs, row_height=44)
         self.tbl_logs.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.tbl_logs.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
-        self.tbl_logs.setColumnWidth(0, 75)
+        self.tbl_logs.setColumnWidth(0, 140)
         self.tbl_logs.setColumnWidth(1, 120)
         self.tbl_logs.setColumnWidth(2, 100)
         self.tbl_logs.setColumnWidth(3, 130)
@@ -119,16 +121,155 @@ class CooPanel(QWidget):
         self.net_client.log_event_received.connect(self.on_live_log_event)
         self.net_client.notification_response_received.connect(self.on_live_notif_response)
         self.net_client.data_changed.connect(lambda scopes: "users" in scopes and self.reload_all_data())
+        self.net_client.data_changed.connect(
+            lambda scopes: bool(set(scopes) & {"projects", "disciplines"}) and self.reload_filter_lists())
         self.net_client.connection_status_changed.connect(lambda ok, _msg: ok and self.reload_all_data())
 
         self.reload_all_data()
+
+    # ------------------------------------------------------------------ log filters
+    PERIODS = ("All time", "Today", "Last 7 days", "This month", "Custom range")
+
+    def _build_log_filters(self) -> QHBoxLayout:
+        """Project / department / Head / period filters for the log feed; filtering happens on the server."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        def combo(label, min_w):
+            row.addWidget(QLabel(label, objectName="FieldLabel"))
+            cmb = QComboBox(self)
+            cmb.setMinimumWidth(min_w)
+            row.addWidget(cmb)
+            return cmb
+
+        self.cmb_log_project = combo("Project:", 170)
+        self.cmb_log_discipline = combo("Department:", 150)
+        self.cmb_log_head = combo("Head:", 150)
+        self.cmb_log_period = combo("Period:", 120)
+        self.cmb_log_period.addItems(self.PERIODS)
+        self.dt_log_from = QDateEdit(QDate.currentDate().addDays(-6), self)
+        self.dt_log_to = QDateEdit(QDate.currentDate(), self)
+        for dt in (self.dt_log_from, self.dt_log_to):
+            dt.setCalendarPopup(True)
+            dt.setDisplayFormat("yyyy-MM-dd")
+        row.addWidget(self.dt_log_from)
+        row.addWidget(QLabel("to", self))
+        row.addWidget(self.dt_log_to)
+        btn_reset = QPushButton("Reset", self)
+        btn_reset.clicked.connect(self.reset_log_filters)
+        row.addWidget(btn_reset)
+        row.addStretch()
+        self.lbl_log_count = QLabel("", self)
+        self.lbl_log_count.setStyleSheet("color: #A1A1AA; font-size: 11px;")
+        row.addWidget(self.lbl_log_count)
+        for cmb in (self.cmb_log_project, self.cmb_log_head, self.cmb_log_period):
+            cmb.currentIndexChanged.connect(self._on_filter_changed)
+        self.cmb_log_discipline.currentIndexChanged.connect(self._on_discipline_filter_changed)
+        self.dt_log_from.dateChanged.connect(self._on_filter_changed)
+        self.dt_log_to.dateChanged.connect(self._on_filter_changed)
+
+        # Live logs arrive in bursts; reload the filtered feed once per burst
+        self._reload_logs_timer = QTimer(self)
+        self._reload_logs_timer.setSingleShot(True)
+        self._reload_logs_timer.setInterval(300)
+        self._reload_logs_timer.timeout.connect(self.reload_logs)
+        self._update_date_edits()
+        return row
+
+    def _update_date_edits(self):
+        custom = self.cmb_log_period.currentText() == "Custom range"
+        self.dt_log_from.setEnabled(custom)
+        self.dt_log_to.setEnabled(custom)
+
+    def _on_discipline_filter_changed(self, *_):
+        self._fill_head_filter()
+        self._on_filter_changed()
+
+    def _on_filter_changed(self, *_):
+        self._update_date_edits()
+        self.reload_logs()
+
+    def reset_log_filters(self):
+        for cmb in (self.cmb_log_project, self.cmb_log_discipline, self.cmb_log_head, self.cmb_log_period):
+            cmb.blockSignals(True)
+            cmb.setCurrentIndex(0)
+            cmb.blockSignals(False)
+        self._fill_head_filter()
+        self._on_filter_changed()
+
+    def period_range(self) -> tuple:
+        """(start, end) as YYYY-MM-DD for the chosen period, or (None, None) for all time."""
+        today = QDate.currentDate()
+        period = self.cmb_log_period.currentText()
+        if period == "Today":
+            start, end = today, today
+        elif period == "Last 7 days":
+            start, end = today.addDays(-6), today
+        elif period == "This month":
+            start, end = QDate(today.year(), today.month(), 1), today
+        elif period == "Custom range":
+            start, end = self.dt_log_from.date(), self.dt_log_to.date()
+        else:
+            return None, None
+        return start.toString("yyyy-MM-dd"), end.toString("yyyy-MM-dd")
+
+    def log_filters(self) -> dict:
+        start, end = self.period_range()
+        filters = {"limit": self.LOG_LIMIT, "project_id": self.cmb_log_project.currentData(),
+                   "discipline_id": self.cmb_log_discipline.currentData(),
+                   "employee_id": self.cmb_log_head.currentData(), "start_date": start, "end_date": end}
+        return {k: v for k, v in filters.items() if v is not None}
+
+    @staticmethod
+    def _refill(cmb: QComboBox, all_label: str, items: list):
+        current = cmb.currentData()
+        cmb.blockSignals(True)
+        cmb.clear()
+        cmb.addItem(all_label, None)
+        for label, value in items:
+            cmb.addItem(label, value)
+        idx = cmb.findData(current)
+        cmb.setCurrentIndex(idx if idx >= 0 else 0)
+        cmb.blockSignals(False)
+
+    def _fill_head_filter(self):
+        disc = self.cmb_log_discipline.currentData()
+        self._refill(self.cmb_log_head, "All Heads",
+                     [(f"{u.get('full_name') or u['user_id']} ({u['user_id']})", u["user_id"])
+                      for u in self.users_data if not disc or u.get("discipline_id") == disc])
+
+    def reload_filter_lists(self):
+        if not self.net_client.is_connected:
+            return
+        self.net_client.call("GET_PROJECTS", {"include_hidden": True}, lambda r: self._refill(
+            self.cmb_log_project, "All Projects",
+            [(f"{p['name']} ({p['project_id']})", p["project_id"]) for p in r.get("projects", [])]),
+            self.on_request_error)
+        self.net_client.call("GET_DISCIPLINES", {"include_hidden": True}, lambda r: self._refill(
+            self.cmb_log_discipline, "All Departments",
+            [(f"{d['name']} ({d['discipline_id']})", d["discipline_id"]) for d in r.get("disciplines", [])]),
+            self.on_request_error)
+
+    def reload_logs(self):
+        if not self.net_client.is_connected:
+            return
+        if self.cmb_log_period.currentText() == "Custom range" and self.dt_log_from.date() > self.dt_log_to.date():
+            self.lbl_log_count.setText("The 'from' date is after the 'to' date.")
+            return
+
+        def shown(r):
+            logs = r.get("logs", [])
+            self.populate_logs_table(logs)
+            more = f" (newest {len(logs)} shown; narrow the filters to see older ones)" if r.get("truncated") else ""
+            self.lbl_log_count.setText(f"{len(logs)} logs{more}")
+        self.net_client.call("GET_RECENT_LOGS", self.log_filters(), shown, self.on_request_error)
 
     def reload_all_data(self):
         if not self.net_client.is_connected:
             return
         self.net_client.call("GET_USERS", {"role": "HEAD"}, self._on_users, self.on_request_error)
-        self.net_client.call("GET_RECENT_LOGS", {"limit": 200},
-                             lambda r: self.populate_logs_table(r.get("logs", [])), self.on_request_error)
+        self.reload_filter_lists()
+        self.reload_logs()
         self.net_client.call("GET_NOTIFICATIONS", {"limit": 200},
                              lambda r: self.populate_responses_table(r.get("notifications", [])), self.on_request_error)
 
@@ -145,6 +286,7 @@ class CooPanel(QWidget):
         idx = self.cmb_target_emp.findData(current)
         if idx >= 0:
             self.cmb_target_emp.setCurrentIndex(idx)
+        self._fill_head_filter()
 
     def populate_logs_table(self, logs: list):
         self.tbl_logs.setRowCount(0)
@@ -153,9 +295,10 @@ class CooPanel(QWidget):
 
     def insert_log_row(self, r_idx: int, l: dict):
         self.tbl_logs.insertRow(r_idx)
-        self.tbl_logs.setItem(r_idx, 0, create_table_item(l["log_id"], Qt.AlignCenter))
+        self.tbl_logs.setItem(r_idx, 0, create_table_item(l.get("submitted_at") or "", Qt.AlignCenter))
         self.tbl_logs.setItem(r_idx, 1, create_table_item(l.get("employee_name") or l["employee_id"], Qt.AlignLeft | Qt.AlignVCenter))
-        self.tbl_logs.setItem(r_idx, 2, create_table_item(l.get("discipline_id") or l.get("task_discipline_id") or "Unassigned", Qt.AlignCenter))
+        self.tbl_logs.setItem(r_idx, 2, create_table_item(l.get("task_discipline_name") or l.get("task_discipline_id")
+                                                          or l.get("discipline_id") or "Unassigned", Qt.AlignCenter))
         self.tbl_logs.setItem(r_idx, 3, create_table_item(l.get("project_name") or l["project_id"], Qt.AlignLeft | Qt.AlignVCenter))
         self.tbl_logs.setItem(r_idx, 4, create_table_item(l.get("task_name") or l["task_id"], Qt.AlignLeft | Qt.AlignVCenter))
         self.tbl_logs.setItem(r_idx, 5, create_table_item(l.get("assigned_to") or "", Qt.AlignLeft | Qt.AlignVCenter))
@@ -174,8 +317,9 @@ class CooPanel(QWidget):
 
     def on_live_log_event(self, data: dict):
         log = data.get("log", {})
-        self.insert_log_row(0, log)
-        self.toast.show_message(f"Live log submitted by {log.get('employee_id')}.")
+        # Reload through the server so the new log appears only if it matches the current filters
+        self._reload_logs_timer.start()
+        self.toast.show_message(f"Live log submitted by {log.get('employee_name') or log.get('employee_id')}.")
 
     def populate_responses_table(self, notifications: list):
         self.tbl_responses.setRowCount(0)

@@ -17,7 +17,7 @@ from app.core.config import (
     DEFAULT_WS_PORT, DEFAULT_HOST, CENTRAL_DB_PATH,
     ROLE_HEAD, ROLE_ADMIN, ROLE_COO, ROLE_SUPER_ADMIN, ALL_ROLES
 )
-from app.database.db_manager import DBManager
+from app.database.db_manager import DBManager, parse_date, check_date_order
 from app.network import protocol as P
 from app.services.excel_service import ExcelExportService
 
@@ -376,8 +376,15 @@ class CentralWebSocketServer:
 
     @action("GET_RECENT_LOGS", roles=OVERSIGHT, response_type="RECENT_LOGS_RESPONSE")
     async def a_recent_logs(self, ws, session, payload, msg_id):
+        """Newest logs, optionally filtered by project, discipline, Head and submission day (From/To inclusive)."""
         limit = min(int(payload.get("limit") or 100), 1000)
-        return {"logs": await self.db_call(self.db.get_progress_logs, limit=limit)}
+        start = parse_date(payload.get("start_date"), "From date", required=False)
+        end = parse_date(payload.get("end_date"), "To date", required=False)
+        check_date_order(start, end, "From date")
+        logs = await self.db_call(self.db.get_progress_logs, project_id=payload.get("project_id"),
+                                  discipline_id=payload.get("discipline_id"), employee_id=payload.get("employee_id"),
+                                  start_date=start, end_date=end, limit=limit + 1)
+        return {"logs": logs[:limit], "truncated": len(logs) > limit}
 
     # ---------------- task proposals ----------------
     @action("PROPOSE_TASK", roles=(ROLE_HEAD,))

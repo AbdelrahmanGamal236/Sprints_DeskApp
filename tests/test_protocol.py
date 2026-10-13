@@ -438,6 +438,42 @@ class TestSoftDeleteProtocol(unittest.TestCase):
                 await server.stop()
         run(scenario())
 
+    def test_recent_logs_filters(self):
+        """The COO feed filters by project, discipline, Head and submission day on the server."""
+        async def scenario():
+            server = await start_server()
+            try:
+                db = server.db
+                for emp, task, prj, when in (("h_urb", "T-URB", "P1", "2026-10-10 09:00:00"),
+                                             ("h_urb2", "T-URB2", "P2", "2026-10-12 17:59:59"),
+                                             ("h_str", "T-STR", "P1", "2026-10-12 08:00:00")):
+                    saved = db.submit_progress_log({"log_id": f"L-{task}", "employee_id": emp, "project_id": prj,
+                                                    "task_id": task, "progress_stage": "In Progress"})
+                    with db.get_connection() as con:
+                        con.execute("UPDATE progress_logs SET submitted_at = ? WHERE log_id = ?", (when, saved["log_id"]))
+                        con.commit()
+                coo = await raw_login(server.port, "coo1")
+
+                async def ids(**f):
+                    r = await coo.req("GET_RECENT_LOGS", f)
+                    self.assertTrue(r["ok"], r)
+                    return sorted(l["task_id"] for l in r["logs"])
+                self.assertEqual(await ids(), ["T-STR", "T-URB", "T-URB2"])
+                self.assertEqual(await ids(project_id="P1"), ["T-STR", "T-URB"])
+                self.assertEqual(await ids(discipline_id="URB"), ["T-URB", "T-URB2"])
+                self.assertEqual(await ids(employee_id="h_str"), ["T-STR"])
+                self.assertEqual(await ids(start_date="2026-10-12", end_date="2026-10-12"), ["T-STR", "T-URB2"])
+                self.assertEqual(await ids(project_id="P1", discipline_id="URB", end_date="2026-10-11"), ["T-URB"])
+                r = await coo.req("GET_RECENT_LOGS", {"limit": 2})
+                self.assertEqual((len(r["logs"]), r["truncated"]), (2, True))
+                r = await coo.req("GET_RECENT_LOGS", {"start_date": "12/10/2026"})
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+                r = await coo.req("GET_RECENT_LOGS", {"start_date": "2026-10-12", "end_date": "2026-10-01"})
+                self.assertEqual(r["code"], P.ERR_VALIDATION)
+            finally:
+                await server.stop()
+        run(scenario())
+
     def test_deleted_project_disappears_for_heads_and_keeps_logs(self):
         async def scenario():
             server = await start_server()

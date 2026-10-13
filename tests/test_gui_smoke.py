@@ -125,6 +125,23 @@ class TestGuiSmoke(unittest.TestCase):
                 # ---- COO: live feed shows the log, alert history and dispatch work
                 ws = (await login(ctrl, "coo1")).panel
                 self.assertTrue(await wait_until(lambda: ws.tbl_logs.rowCount() >= 1))
+                # Feed filters: project, department, Head and period are applied by the server
+                self.assertTrue(await wait_until(lambda: ws.cmb_log_project.count() == 4 and ws.cmb_log_head.count() == 5))
+                total = ws.tbl_logs.rowCount()
+                ws.cmb_log_project.setCurrentIndex(ws.cmb_log_project.findData("P2"))
+                self.assertTrue(await wait_until(lambda: ws.tbl_logs.rowCount() == 0))
+                ws.cmb_log_project.setCurrentIndex(0)
+                ws.cmb_log_discipline.setCurrentIndex(ws.cmb_log_discipline.findData("URB"))
+                self.assertEqual(ws.cmb_log_head.count(), 3)  # All Heads + the two URB Heads
+                ws.cmb_log_period.setCurrentText("Today")
+                self.assertTrue(await wait_until(lambda: ws.tbl_logs.rowCount() == total))
+                self.assertRegex(ws.tbl_logs.item(0, 0).text(), r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}")  # submission time
+                ws.cmb_log_period.setCurrentText("Custom range")
+                ws.dt_log_from.setDate(ws.dt_log_from.date().addDays(-30))
+                ws.dt_log_to.setDate(ws.dt_log_to.date().addDays(-20))
+                self.assertTrue(await wait_until(lambda: ws.tbl_logs.rowCount() == 0))
+                ws.reset_log_filters()
+                self.assertTrue(await wait_until(lambda: ws.tbl_logs.rowCount() == total))
                 self.assertTrue(await wait_until(lambda: ws.cmb_target_emp.count() == 4))
                 ws.cmb_target_emp.setCurrentIndex(ws.cmb_target_emp.findData("h_urb"))
                 ws.txt_message.setText("Please review P1")
