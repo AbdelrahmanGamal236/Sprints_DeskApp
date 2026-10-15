@@ -139,6 +139,34 @@ DEPLOYMENT.md in the same folder.
 
 
 ---------------------------------------------------------------------
+ 5a. PASSWORDS AFTER "RESET ALL PASSWORDS" (done on 2026-10-15)
+---------------------------------------------------------------------
+
+ All accounts were reset. Everyone must choose a new password the
+ first time they log in after the reset.
+
+ HEADS (every Head account):
+      User ID  : the Head's ID, for example 4003
+      Password : the SAME as the ID, for example 4003
+
+ SUPER ADMIN (superadmin), ADMIN (admin) and COO (coo):
+      For security these three accounts never use their ID as a
+      password. Each got a random one-time password, written in this
+      file ON THE SERVER PC ONLY:
+
+          C:\DeskApp\data\FIRST_RUN_CREDENTIALS.txt
+          (look for "Password reset of all accounts")
+
+      Open it with Notepad, hand each password to its owner, and
+      DELETE the file once all three have logged in and chosen new
+      passwords. The Super Admin can also see every current password
+      in the "Password" column of the accounts table.
+
+ These passwords are not written here on purpose: this guide is
+ copied to every PC, so anyone could read them.
+
+
+---------------------------------------------------------------------
  6. IF A PC CANNOT CONNECT
 ---------------------------------------------------------------------
 
